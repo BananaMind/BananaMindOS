@@ -1,0 +1,20 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  source-and-kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib binutils make nasm python3 python3-numpy
+      - name: Unit tests
+        run: make check
+      - name: i486 kernel
+        run: make kernel
