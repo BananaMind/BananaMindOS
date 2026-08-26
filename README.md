@@ -1,136 +1,184 @@
 # BananaMind OS
 
-BananaMind OS is a freestanding 32-bit x86 inference system for local
-BananaMind models. It boots on QEMU's emulated Intel 486, needs no Linux or
-libc at runtime, displays a yellow prompt/response interface, streams up to
-16 generated tokens, and shows live tokens per second (TPS).
+BananaMind OS is a portable, installation-free x86 inference system. It boots
+straight from an ISO, uses no Linux kernel or userspace at runtime, and presents
+one focused graphical interface for selecting a local model and talking to it.
 
-Supported checkpoints and formats:
+The graphical kernel runs on original Pentium and newer machines. It starts from
+an x87-safe baseline, detects CPU features at runtime, and automatically selects
+x87, SSE, or SSE2 matrix kernels. A separate i486 kernel provides the original
+keyboard-driven text interface for small compatible models. GRUB never receives
+a model as a boot module: it loads one kernel, and the chosen `.litemodel` is
+read from the ISO only after the operating system and model picker are running.
 
-| Checkpoint | Variants in the ISO | Recommended RAM |
-|---|---|---:|
-| BananaMind-2-Nano Base | Q2, Q4, Q8 | 6, 8, 14 MiB |
-| BananaMind-2-Nano-Chat | Q2, Q4, Q8 | 6, 8, 14 MiB |
-| BananaMind-2-Micro | Q4, Q8, FP16 | 4, 5, 8 MiB |
-| MicroBananaMind-v1 | FP16, FP32 | 4, 6 MiB |
-| BananaMind-2-Mini | Q2, Q4 | 12, 20 MiB |
+## Supported models
 
-Micro Q4 is marked **VERY LOW QUALITY** and Mini Q4 is intended for good PCs.
-The kernel infers each supported architecture from its dimensions and
-implements GQA attention, RoPE, RMSNorm, SwiGLU, Q/K normalization where used,
-and BananaMind-2-Micro's XSA refresh gate.
+All architectures use the same architecture-neutral `.litemodel` container.
+Their converters and inference implementations remain separate source modules.
 
-## Build
+| Model | Runtime module | Modes |
+|---|---|---|
+| BananaMind 2 Nano / Nano Chat | BananaMind | base, chat |
+| BananaMind 2 Micro | BananaMind | base |
+| MicroBananaMind v1 | BananaMind | base |
+| BananaMind 2 Mini / Mini Chat | BananaMind | base, chat |
+| BananaMind 2 Medium / Medium Chat | BananaMind | base, chat |
+| BananaMind 2 Pro | BananaMind | base |
+| BananaMind 2 Pro Preview Chat | BananaMind | chat |
+| SmolLM-135M | Llama | base |
+| SmolLM2-135M | Llama | base |
+| GPT-X2.5-135M | GPT-X2 | base |
+| min-spark 1.1 | Meiosis | base |
+| Rose-Mini | Rose X1 | base |
 
-On Debian/Ubuntu, install GNU make, GCC with 32-bit support, binutils, NASM,
-Python 3, curl, xorriso, GRUB rescue tools, and optionally QEMU:
+Supra2 Medium Base and Supra2 Medium Instruct are intentionally not included.
+Exact repositories, pinned revisions, supported quantizations, RAM estimates,
+and presets live in [`models/registry.json`](models/registry.json).
 
-```sh
-sudo apt install make gcc-multilib binutils nasm python3 python3-numpy \
-  curl xorriso grub-pc-bin qemu-system-x86
-make check
-make iso ultra
-```
+## Build a portable ISO
 
-Model downloads are pinned to exact Hugging Face revisions. They are stored
-under `build/`, converted locally, and are not committed to Git.
 
-The build creates two bootable images:
 
-- `build/bananamind-os.iso`: GRUB menu, all 13 models, graphical framebuffer.
-- `build/bananamind-ultra.iso`: custom BananaMind BIOS/El Torito loader, all
-  13 models, no GRUB. It loads only the selected model and requests the same
-  640x480 yellow framebuffer, with yellow VGA text as fallback.
-
-The custom loader does not make a 0.7-1 MiB Micro system possible. Micro Q4's
-weights alone are 1.54 MiB; kernel state, tokenizer, BSS, refresh history, and
-KV cache raise the verified minimum to 4 MiB. Unlike GRUB, the custom loader
-does successfully boot Micro Q4 at exactly 4 MiB in QEMU.
-
-Useful build stages:
+On Debian or Ubuntu, install the host-side build tools:
 
 ```sh
-make download        # all pinned source checkpoints
-make models          # all BM2NQ files
-make kernel          # freestanding i486 kernel only
-make iso             # standard full ISO
-make ultra           # custom-loader full ISO
+sudo apt install make gcc-multilib binutils python3 curl xorriso grub-pc-bin \
+  grub-efi-amd64-bin gnu-efi dosfstools mtools ovmf qemu-system-x86
 ```
 
-## Run
-
-Standard graphical ISO (defaults to Nano Chat Q4):
+Run the interactive builder:
 
 ```sh
-make run
-# equivalent:
-qemu-system-i386 -cpu 486 -m 8 -cdrom build/bananamind-os.iso -boot d
+./build-model-iso.sh
 ```
 
-Custom-loader ISO:
+On Windows, `build-model-iso.bat` provides the same model menu. Python can run
+the downloader and converter natively; GRUB ISO creation requires the build to
+run under WSL with the packages above.
+
+The builder downloads only the models selected, pins them to the revisions in
+the registry, quantizes them locally, writes `.litemodel` files, creates the
+post-boot catalog, and builds the ISO. Downloads and generated weights remain
+under `build/` and are not installed on the host.
+
+Non-interactive examples:
 
 ```sh
-make run-ultra
-# Micro Q4: choose 7 at the yellow custom menu (4 MiB)
-qemu-system-i386 -cpu 486 -m 4 -cdrom build/bananamind-ultra.iso -boot d
+./build-model-iso.sh --preset 25 --yes
+./build-model-iso.sh --models mini-chat:4,rose-mini:2 --yes --output build/custom.iso
+./build-model-iso.sh --preset 25 --uefi --yes
 ```
 
-Examples for larger selections:
+The supplied RAM profiles can also be built through Make:
 
 ```sh
-# MicroBananaMind-v1 FP32: choose B
-qemu-system-i386 -cpu 486 -m 6 -cdrom build/bananamind-ultra.iso -boot d
-
-# Mini Q4: choose D
-qemu-system-i386 -cpu 486 -m 20 -cdrom build/bananamind-ultra.iso -boot d
+make preset-10
+make preset-25
+make preset-100
+make preset-250
+# or all four:
+make preset-isos
 ```
 
-At up to 2 MiB below the recommended amount, the loader/kernel offers
-Continue or Return. Farther below it displays Not Enough RAM and returns to
-model selection. The model still must physically fit; selecting Continue
-cannot bypass that limit.
+Each profile contains several useful choices that individually fit its target
+RAM class; the OS loads only the selected model. Generated images are named
+`build/bananamind-{10,25,100,250}mb.iso`.
 
-## Host runner and demo prompt
+## Default development ISO
 
-The NumPy/BLAS runner reads the exact custom format used by the OS:
+`make iso` builds `build/bananamind-os.iso` from the small BananaMind models
+already described by `models/default.cfg`. Useful commands are:
 
 ```sh
-make host-chat
-make host-micro
-make host-microv1
-make host-mini
+make kernel       # modern kernel.elf and kernel-486.elf
+make litemodels   # default .litemodel files
+make iso          # portable GRUB ISO
+make uefi-iso     # portable x86-64 UEFI ISO
+make check        # converter unit tests
 ```
 
-For the strongest small demo tested here, Nano Chat Q4 answers correctly:
+The default graphical kernel is a universal Pentium-and-later build. It safely
+detects `CPUID` at runtime and selects x87 on Pentium/Pentium II, SSE on Pentium
+III, or SSE2 on Pentium 4 and newer:
 
 ```sh
-python3 tools/run_bm2n.py build/chat-q4.bm --chat --kernel-math \
-  --prompt "What is the first letter of the alphabet? Answer only A."
+make iso
 ```
 
-Observed output: `The first letter of the alphabet is A.` Mini Q4 produced a
-repetitive but correct `A. A. ...`; Mini Q2 did not produce a coherent answer.
-Quantization can change greedy output, so Q2 and Micro Q4 should be treated as
-size demonstrations, not reliable assistants.
+`GUI_CPU` can still be set to `pentium`, `pentium2`, `pentium3`, or `pentium4`
+for a CPU-specific build. Each variant uses its own object directory, so
+switching targets does not require `make clean`.
 
-Convert a supported safetensors checkpoint manually:
+Run the modern GUI in QEMU:
 
 ```sh
-python3 tools/convert.py --model model.safetensors --tokenizer tokenizer.json \
-  --config config.json --bits 4 --output model-q4.bm
-python3 tools/bm2n_info.py model-q4.bm
-python3 tools/run_bm2n.py model-q4.bm --prompt "Hello"
+qemu-system-i386 -cpu qemu32 -m 128 -cdrom build/bananamind-os.iso -boot d
 ```
 
-`--bits` accepts 2, 4, 8, 16, or 32. FP16/FP32 are intended for the requested
-Micro checkpoints; Q2/Q4/Q8 use row-wise custom quantization.
+For a native x86-64 UEFI machine, build and run:
 
-## Hardware status and licensing
+```sh
+make uefi-iso
+make run-uefi
+```
 
-QEMU is tested with `-cpu 486`. Real 486 hardware is plausible but untested;
-a 486DX/x87, legacy BIOS, VGA/VBE, PS/2 keyboard, and ATAPI-compatible boot
-path are expected. A 486SX without a floating-point coprocessor is unsupported.
+For a manual QEMU command, attach a firmware-visible pointing device with
+`-device qemu-xhci -device usb-tablet`. The UEFI frontend accepts both the
+absolute-pointer protocol used by QEMU tablets and the relative-pointer
+protocol used by many physical firmware implementations. Arrow keys and Enter
+remain available when firmware exposes no pointer protocol.
 
-Project source is MIT licensed. The downloaded BananaMind model repositories
-declare Apache-2.0; generated model files and ISOs are ignored by Git and are
-created locally. See [the BM2NQ format](docs/BM2NQ.md) for the binary layout.
+This produces `build/bananamind-os-uefi.iso`. Its x86-64 EFI GRUB image
+chainloads the native BananaMindOS frontend. The frontend uses UEFI GOP and
+filesystem services, reads only `CATALOG.CFG` before showing the model picker,
+and loads the selected `.litemodel` afterward. Secure Boot must be disabled
+because the locally built EFI binaries are unsigned.
+
+No NVMe driver is included or required for this boot path: the firmware reads
+the portable FAT boot image. BananaMindOS does not mount or modify installed
+disks. Raw-writing the ISO to removable media keeps the same installation-free
+behavior.
+
+Choose “486 compatibility mode” in GRUB for a 486DX/x87 machine. That entry
+loads `kernel-486.elf`, ignores the graphical interface, and lists only catalog
+entries marked `legacy`. A 486SX without an FPU is unsupported.
+
+## Runtime design
+
+The modern UI is not a desktop environment. It is a single model-library and
+conversation workflow with mouse and keyboard input. The Models button returns
+to the post-boot library without rebooting, while Send submits the prompt.
+When min-spark is active, the header exposes Low, Medium, and High effort
+controls, corresponding to two, three, and four recurrent Meiosis loops.
+
+The generation bar is available in both the BIOS and native UEFI graphical
+frontends:
+
+- **Multi** is enabled only for catalog entries marked as chat checkpoints. It
+  preserves prior user and assistant turns in a bounded history buffer. Turning
+  it off clears that history and makes each prompt an independent request.
+- **KV Cache** reuses transformer keys and values when enabled. Turning it off
+  recomputes the complete active sequence for every generated token, which uses
+  the same context but is substantially slower. min-spark shows `KV N/A`
+  because its Meiosis runtime is a full-sequence recurrent architecture.
+- **Auto N** shows the automatically selected context/KV capacity. Model load
+  tries 256, 128, 64, 32, then 16 tokens and keeps the largest capacity allowed
+  by both the checkpoint and available RAM. Clicking it cycles through manual
+  capacities that fit the allocated cache.
+- **Max** cycles the maximum generated response through 8, 16, 32, 64, and 128
+  tokens, subject to the remaining context capacity.
+- **Temp** cycles 0.0, 0.2, 0.5, 0.8, and 1.0. A temperature of 0.0 is greedy;
+  nonzero values sample from the model's softmax distribution.
+
+The kernel includes PS/2 mouse support, ATA Packet Interface CD reads, a small
+ISO9660 reader, byte-level BPE, quantized matrix kernels, and separate runtime
+adapters for BananaMind, Llama, GPT-X2, Rose X1, and Meiosis. min-spark uses its
+own full-sequence recurrent loop because that architecture has no KV cache.
+
+See [the `.litemodel` format](docs/LITEMODEL.md) for the portable container.
+The earlier BM2NQ implementation remains documented in
+[`docs/BM2NQ.md`](docs/BM2NQ.md) for the optional ultra-loader compatibility
+path.
+
+Project source is MIT licensed. Downloaded checkpoints and derivative model
+files remain subject to the license terms of their respective model repositories.

@@ -1,0 +1,27 @@
+#include <stdint.h>
+
+#include "litemodel_runtime.h"
+
+struct __attribute__((packed)) gptx_config {
+    uint32_t xsa;
+    uint32_t qk_norm;
+    uint32_t embedding_scale;
+};
+
+int lm_arch_gptx_load(struct lm_runtime *runtime, const uint8_t *config_,
+                      uint32_t config_size, const uint8_t *weights,
+                      const uint8_t *weights_end) {
+    if (config_size != sizeof(struct gptx_config)) return 0;
+    const struct gptx_config *config = (const struct gptx_config *)config_;
+    if (config->xsa > 1u || config->qk_norm > 1u || config->embedding_scale > 1u)
+        return 0;
+    struct lm_transformer_spec spec = {
+        (uint8_t)config->qk_norm,
+        (uint8_t)config->embedding_scale,
+        (uint8_t)config->xsa,
+        0u,
+        0u,
+        0u,
+    };
+    return lm_parse_transformer(runtime, weights, weights_end, &spec);
+}

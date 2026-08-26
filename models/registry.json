@@ -1,0 +1,101 @@
+{
+  "format_version": 1,
+  "models": [
+    {
+      "id": "nano-base", "repo": "BananaMind/BananaMind-2-Nano",
+      "revision": "c8564d1bd3f6177221ed7e4f63ae5f281a677a1c", "architecture": "banana",
+      "name": "BananaMind 2 Nano", "chat": false, "legacy": true,
+      "description": "Compact BananaMind base model", "quants": {"2": 6, "4": 8, "8": 14}
+    },
+    {
+      "id": "nano-chat", "repo": "BananaMind/BananaMind-2-Nano-Chat",
+      "revision": "6def7ab4d1bd8449d9b75b62bfb174f73d3a8ad6", "architecture": "banana",
+      "name": "BananaMind 2 Nano Chat", "chat": true, "legacy": true,
+      "description": "Fast compact assistant", "quants": {"2": 6, "4": 8, "8": 14}
+    },
+    {
+      "id": "micro2", "repo": "BananaMind/BananaMind-2-Micro",
+      "revision": "dbc892b2df93f45d120b07c64673f00e3abb1593", "architecture": "banana",
+      "name": "BananaMind 2 Micro", "chat": false, "legacy": true,
+      "description": "Tiny XSA refresh model", "quants": {"4": 4, "8": 5, "16": 8}
+    },
+    {
+      "id": "micro-v1", "repo": "BananaMind/MicroBananaMind-v1",
+      "revision": "2dd299a219ffabc05bfcd39862e9293c68d3ef92", "architecture": "banana",
+      "name": "MicroBananaMind v1", "chat": false, "legacy": true,
+      "description": "Smallest classic BananaMind", "quants": {"16": 4, "32": 6}
+    },
+    {
+      "id": "mini", "repo": "BananaMind/BananaMind-2-Mini",
+      "revision": "6400d0a6dcbe52f3c725291cb97c079c591c05a4", "architecture": "banana",
+      "name": "BananaMind 2 Mini", "chat": false, "legacy": true,
+      "description": "25M parameter base model", "quants": {"2": 12, "4": 20, "8": 34}
+    },
+    {
+      "id": "mini-chat", "repo": "BananaMind/BananaMind-2-Mini-Chat",
+      "revision": "121fb22f6307f6b8be1976719357661be009628d", "architecture": "banana",
+      "name": "BananaMind 2 Mini Chat", "chat": true, "legacy": false,
+      "description": "Balanced 25M parameter assistant", "quants": {"2": 12, "4": 20, "8": 34}
+    },
+    {
+      "id": "medium", "repo": "BananaMind/BananaMind-2-Medium",
+      "revision": "7d2f397ef1cae15cf84cd6d9b428373238aa3231", "architecture": "banana",
+      "name": "BananaMind 2 Medium", "chat": false, "legacy": false,
+      "description": "50M parameter BananaMind base", "quants": {"2": 25, "4": 40, "8": 70}
+    },
+    {
+      "id": "medium-chat", "repo": "BananaMind/BananaMind-2-Medium-Chat",
+      "revision": "86bfcd9075e54a7da8aa101d9ba2ca819fa59143", "architecture": "banana",
+      "name": "BananaMind 2 Medium Chat", "chat": true, "legacy": false,
+      "description": "Stronger 50M parameter assistant", "quants": {"2": 25, "4": 40, "8": 70}
+    },
+    {
+      "id": "pro", "repo": "BananaMind/BananaMind-2-Pro",
+      "revision": "c215af4f2cc46d01cba6c5be3c132f4c0e9a9871", "architecture": "banana",
+      "name": "BananaMind 2 Pro", "chat": false, "legacy": false,
+      "description": "139M parameter BananaMind base", "quants": {"2": 64, "4": 100, "8": 190}
+    },
+    {
+      "id": "pro-chat", "repo": "BananaMind/BananaMind-2-Pro-Preview-Chat",
+      "revision": "04011eeb6054fa30145019eebc2af3425856979c", "architecture": "banana",
+      "name": "BananaMind 2 Pro Preview Chat", "chat": true, "legacy": false,
+      "description": "Largest BananaMind assistant", "quants": {"2": 64, "4": 100, "8": 190}
+    },
+    {
+      "id": "smollm", "repo": "HuggingFaceTB/SmolLM-135M",
+      "revision": "1d461723eec654e65efdc40cf49301c89c0c92f4", "architecture": "llama",
+      "name": "SmolLM 135M", "chat": false, "legacy": false,
+      "description": "Original 135M SmolLM base", "quants": {"2": 64, "4": 100, "8": 190}
+    },
+    {
+      "id": "smollm2", "repo": "HuggingFaceTB/SmolLM2-135M",
+      "revision": "93efa2f097d58c2a74874c7e644dbc9b0cee75a2", "architecture": "llama",
+      "name": "SmolLM2 135M", "chat": false, "legacy": false,
+      "description": "Strong 135M Llama-family base", "quants": {"2": 64, "4": 100, "8": 190}
+    },
+    {
+      "id": "gptx25", "repo": "AxiomicLabs/GPT-X2.5-135M",
+      "revision": "4b49a8d6986f11989df15de37b44be7d04e634e7", "architecture": "gptx",
+      "name": "GPT-X2.5 135M", "chat": false, "legacy": false,
+      "description": "XSA-enhanced 135M base model", "quants": {"2": 64, "4": 100, "8": 190}
+    },
+    {
+      "id": "min-spark", "repo": "MinimaLabs/min-spark-1.1",
+      "revision": "b47322abe7fda086e1b675e7fc4fafd55e717b23", "architecture": "minspark",
+      "name": "min-spark 1.1", "chat": false, "legacy": false,
+      "description": "5.76M looped Meiosis model", "quants": {"4": 10, "8": 15, "16": 25}
+    },
+    {
+      "id": "rose-mini", "repo": "GODELEV/Rose-Mini",
+      "revision": "780e73ff85d8207e2fc7f5f98e060fd4715b8bd5", "architecture": "rose",
+      "name": "Rose-Mini", "chat": false, "legacy": false,
+      "description": "Rose X1 with selected refresh gates", "quants": {"2": 25, "4": 40, "8": 75}
+    }
+  ],
+  "presets": {
+    "10": ["nano-chat:4", "micro2:8", "micro-v1:32", "min-spark:4"],
+    "25": ["mini-chat:4", "medium-chat:2", "rose-mini:2", "min-spark:16"],
+    "100": ["medium-chat:8", "rose-mini:8", "pro-chat:4", "smollm2:4", "gptx25:4"],
+    "250": ["pro:8", "pro-chat:8", "smollm2:8", "gptx25:8", "medium-chat:8"]
+  }
+}

@@ -1,10 +1,16 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "bm2n.h"
+#include "cpu.h"
 #include "font8x8.h"
+#include "litemodel.h"
+#include "litemodel_runtime.h"
+#include "model_store.h"
+#include "mouse.h"
 
 #define MULTIBOOT_BOOTLOADER_MAGIC 0x2BADB002u
 #define MULTIBOOT_INFO_MEMORY      0x00000001u
+#define MULTIBOOT_INFO_CMDLINE     0x00000004u
 #define MULTIBOOT_INFO_MODS        0x00000008u
 #define MULTIBOOT_INFO_FRAMEBUFFER 0x00001000u
 #define VGA_WIDTH 80
@@ -18,6 +24,7 @@
 #define MAX_VOCAB 8192
 #define REFRESH_KERNEL 9
 #define MAX_INPUT_BYTES 512
+#define CHAT_HISTORY_BYTES 4096
 #define MAX_BPE_TOKENS 512
 #define MERGE_SLOTS 16384
 
@@ -87,8 +94,30 @@ static uint8_t fb_bpp, fb_bytes;
 static uint8_t fb_red_pos, fb_green_pos, fb_blue_pos;
 static uint32_t gui_x, gui_y, gui_x0, gui_y0, gui_x1, gui_y1;
 static uint32_t gui_background = 2;
+static uint32_t gui_foreground = 1u;
 static struct model net;
 static struct merge_slot merge_table[MERGE_SLOTS];
+static struct lm_runtime lite_model;
+static struct model_store iso_models;
+static struct mouse_state mouse;
+static uint8_t using_litemodel;
+static uint8_t mouse_ready;
+static uint8_t compatibility_mode;
+static uint8_t multi_turn_enabled = 1u;
+static uint8_t kv_cache_enabled = 1u;
+static uint32_t context_tokens_setting;
+static uint32_t max_generation_tokens = 16u;
+static uint32_t temperature_tenths;
+static uint32_t random_state = 0x6D2B79F5u;
+static uint8_t chat_history[CHAT_HISTORY_BYTES];
+static uint32_t chat_history_length;
+static const struct model_store_entry *active_entry;
+static enum cpu_math_backend math_backend;
+
+static uint32_t number_text(uint32_t value, char *output);
+static uint32_t text_length(const char *text);
+
+extern uint8_t _kernel_end;
 
 /* The fixed buffers are the reason BM2N_CONTEXT is capped at 64. */
 static float *key_cache;
@@ -139,11 +168,15 @@ static void fpu_init(void) {
     __asm__ volatile ("mov %0, %%cr0\n\tfninit" : : "r"(cr0));
 }
 
-enum ui_color { UI_YELLOW, UI_INK, UI_PANEL, UI_WHITE, UI_RED, UI_GREEN, UI_SHADOW };
+enum ui_color {
+    UI_YELLOW, UI_INK, UI_PANEL, UI_WHITE, UI_RED, UI_GREEN, UI_SHADOW,
+    UI_DARK, UI_SURFACE, UI_BORDER, UI_MUTED, UI_HOVER, UI_SELECTED
+};
 
 static const uint32_t ui_rgb[] = {
     0xF4C430u, 0x30260Fu, 0xFFF3B0u, 0xFFFFFFu,
-    0xC62828u, 0x237A36u, 0xC89B16u
+    0xC62828u, 0x237A36u, 0xC89B16u, 0x101318u,
+    0x1A2028u, 0x343D49u, 0x95A0AEu, 0x252E39u, 0x3A3217u
 };
 
 static void palette_init(void) {
@@ -176,11 +209,86 @@ static void pixel(uint32_t px, uint32_t py, uint32_t palette_color) {
     if (fb_bytes > 3) address[3] = (uint8_t)(value >> 24);
 }
 
+#define POINTER_WIDTH 12u
+#define POINTER_HEIGHT 18u
+static uint32_t pointer_under[POINTER_WIDTH * POINTER_HEIGHT];
+static int32_t pointer_x, pointer_y;
+static uint8_t pointer_saved;
+
+static uint32_t raw_pixel(uint32_t px, uint32_t py) {
+    volatile uint8_t *address = framebuffer + py * fb_pitch + px * fb_bytes;
+    uint32_t value = address[0];
+    if (fb_bytes > 1u) value |= (uint32_t)address[1] << 8;
+    if (fb_bytes > 2u) value |= (uint32_t)address[2] << 16;
+    if (fb_bytes > 3u) value |= (uint32_t)address[3] << 24;
+    return value;
+}
+
+static void put_raw_pixel(uint32_t px, uint32_t py, uint32_t value) {
+    volatile uint8_t *address = framebuffer + py * fb_pitch + px * fb_bytes;
+    address[0] = (uint8_t)value;
+    if (fb_bytes > 1u) address[1] = (uint8_t)(value >> 8);
+    if (fb_bytes > 2u) address[2] = (uint8_t)(value >> 16);
+    if (fb_bytes > 3u) address[3] = (uint8_t)(value >> 24);
+}
+
+static void pointer_restore(void) {
+    if (!pointer_saved) return;
+    for (uint32_t row = 0; row < POINTER_HEIGHT; ++row)
+        for (uint32_t column = 0; column < POINTER_WIDTH; ++column) {
+            int32_t px = pointer_x + (int32_t)column;
+            int32_t py = pointer_y + (int32_t)row;
+            if (px >= 0 && py >= 0 && px < (int32_t)fb_width && py < (int32_t)fb_height)
+                put_raw_pixel((uint32_t)px, (uint32_t)py,
+                              pointer_under[row * POINTER_WIDTH + column]);
+        }
+    pointer_saved = 0;
+}
+
+static int pointer_shape(uint32_t column, uint32_t row) {
+    if (row < 12u && column <= row / 2u) return 1;
+    if (row >= 7u && row < 16u && column >= 3u && column <= 5u) return 1;
+    if (row >= 11u && row < 18u && column == row - 8u) return 1;
+    return 0;
+}
+
+static void pointer_draw(int32_t left, int32_t top) {
+    pointer_restore();
+    pointer_x = left;
+    pointer_y = top;
+    for (uint32_t row = 0; row < POINTER_HEIGHT; ++row)
+        for (uint32_t column = 0; column < POINTER_WIDTH; ++column) {
+            int32_t px = left + (int32_t)column;
+            int32_t py = top + (int32_t)row;
+            if (px < 0 || py < 0 || px >= (int32_t)fb_width || py >= (int32_t)fb_height)
+                continue;
+            pointer_under[row * POINTER_WIDTH + column] = raw_pixel((uint32_t)px, (uint32_t)py);
+        }
+    pointer_saved = 1;
+    for (uint32_t row = 0; row < POINTER_HEIGHT; ++row)
+        for (uint32_t column = 0; column < POINTER_WIDTH; ++column)
+            if (pointer_shape(column, row)) {
+                int32_t px = left + (int32_t)column;
+                int32_t py = top + (int32_t)row;
+                if (px >= 0 && py >= 0 && px < (int32_t)fb_width && py < (int32_t)fb_height)
+                    pixel((uint32_t)px, (uint32_t)py,
+                          (column == 0u || row == 0u) ? UI_WHITE : UI_INK);
+            }
+}
+
 static void fill_rect(uint32_t left, uint32_t top, uint32_t width, uint32_t height,
                       uint32_t palette_color) {
     uint32_t right = left + width, bottom = top + height;
     if (right > fb_width) right = fb_width;
     if (bottom > fb_height) bottom = fb_height;
+    if (fb_bytes == 4u) {
+        uint32_t value = direct_color(palette_color);
+        for (uint32_t py = top; py < bottom; ++py) {
+            volatile uint32_t *row = (volatile uint32_t *)(framebuffer + py * fb_pitch);
+            for (uint32_t px = left; px < right; ++px) row[px] = value;
+        }
+        return;
+    }
     for (uint32_t py = top; py < bottom; ++py)
         for (uint32_t px = left; px < right; ++px) pixel(px, py, palette_color);
 }
@@ -197,10 +305,11 @@ static void draw_glyph(uint32_t left, uint32_t top, char character,
         }
 }
 
-static void draw_label(uint32_t left, uint32_t top, const char *text, uint32_t scale) {
+static void draw_text(uint32_t left, uint32_t top, const char *text,
+                      uint32_t foreground, uint32_t background) {
     while (*text) {
-        draw_glyph(left, top, *text++, UI_INK, UI_YELLOW, scale);
-        left += 8u * scale;
+        draw_glyph(left, top, *text++, foreground, background, 1u);
+        left += 8u;
     }
 }
 
@@ -232,7 +341,7 @@ static void gui_putc(char c) {
         fill_rect(gui_x, gui_y, 8, 8, gui_background);
         return;
     }
-    draw_glyph(gui_x, gui_y, c, UI_INK, gui_background, 1);
+    draw_glyph(gui_x, gui_y, c, gui_foreground, gui_background, 1);
     gui_x += 8;
     if (gui_x + 8 > gui_x1) {
         gui_x = gui_x0; gui_y += 8;
@@ -240,63 +349,213 @@ static void gui_putc(char c) {
     }
 }
 
-static uint32_t input_top(void) { return fb_height - 64u; }
+static uint32_t input_top(void) { return fb_height - 112u; }
+
+static uint8_t min_spark_active(void) {
+    return using_litemodel && lite_model.header &&
+        lite_model.header->architecture == LITEMODEL_ARCH_MINSPARK;
+}
+
+static uint32_t active_context_capacity(void) {
+    return using_litemodel ? lite_model.context_capacity : BM2N_CONTEXT;
+}
+
+static uint32_t effective_context_tokens(void) {
+    uint32_t capacity = active_context_capacity();
+    if (context_tokens_setting && context_tokens_setting < capacity)
+        return context_tokens_setting;
+    return capacity;
+}
+
+enum settings_action {
+    SETTINGS_NONE, SETTINGS_MULTI_TURN, SETTINGS_KV_CACHE,
+    SETTINGS_CONTEXT, SETTINGS_MAX_TOKENS, SETTINGS_TEMPERATURE
+};
+
+static void draw_checkbox(uint32_t left, uint32_t top, uint8_t checked,
+                          uint8_t enabled) {
+    uint32_t border = enabled ? UI_BORDER : UI_SURFACE;
+    uint32_t foreground = enabled ? UI_YELLOW : UI_MUTED;
+    fill_rect(left, top, 16u, 16u, border);
+    fill_rect(left + 2u, top + 2u, 12u, 12u, UI_DARK);
+    if (checked) {
+        draw_glyph(left + 4u, top + 4u, 'X', foreground, UI_DARK, 1);
+    }
+}
+
+static void gui_draw_settings(void) {
+    if (!gui_enabled) return;
+    fill_rect(0u, 56u, fb_width, 48u, UI_DARK);
+    fill_rect(0u, 103u, fb_width, 1u, UI_BORDER);
+    if (fb_width < 640u) {
+        draw_text(20u, 73u, "GENERATION SETTINGS REQUIRE 640PX", UI_MUTED, UI_DARK);
+        return;
+    }
+
+    uint8_t multi_available = chat_mode;
+    uint8_t kv_available = !min_spark_active();
+    draw_checkbox(28u, 72u, multi_turn_enabled && multi_available, multi_available);
+    draw_text(50u, 76u, "MULTI", multi_available ? UI_WHITE : UI_MUTED, UI_DARK);
+    draw_checkbox(160u, 72u, kv_cache_enabled && kv_available, kv_available);
+    draw_text(182u, 76u, kv_available ? "KV CACHE" : "KV N/A",
+              kv_available ? UI_WHITE : UI_MUTED, UI_DARK);
+
+    char context_label[16] = "AUTO ";
+    uint32_t offset = 5u;
+    uint32_t shown_context = effective_context_tokens();
+    if (context_tokens_setting) {
+        context_label[0] = 'K'; context_label[1] = 'V'; context_label[2] = ' ';
+        offset = 3u;
+    }
+    number_text(shown_context, context_label + offset);
+    fill_rect(284u, 64u, 112u, 32u, UI_HOVER);
+    draw_text(292u, 76u, context_label, UI_WHITE, UI_HOVER);
+
+    char max_label[16] = "MAX ";
+    number_text(max_generation_tokens, max_label + 4u);
+    fill_rect(404u, 64u, 96u, 32u, UI_HOVER);
+    draw_text(416u, 76u, max_label, UI_WHITE, UI_HOVER);
+
+    char temperature_label[16] = "TEMP 0.0";
+    temperature_label[5] = (char)('0' + temperature_tenths / 10u);
+    temperature_label[7] = (char)('0' + temperature_tenths % 10u);
+    fill_rect(508u, 64u, 112u, 32u, UI_HOVER);
+    draw_text(520u, 76u, temperature_label, UI_WHITE, UI_HOVER);
+}
+
+static enum settings_action gui_settings_hit(int32_t x, int32_t y) {
+    if (fb_width < 640u || y < 64 || y >= 96) return SETTINGS_NONE;
+    if (x >= 20 && x < 140) return SETTINGS_MULTI_TURN;
+    if (x >= 152 && x < 276) return SETTINGS_KV_CACHE;
+    if (x >= 284 && x < 396) return SETTINGS_CONTEXT;
+    if (x >= 404 && x < 500) return SETTINGS_MAX_TOKENS;
+    if (x >= 508 && x < 620) return SETTINGS_TEMPERATURE;
+    return SETTINGS_NONE;
+}
+
+static void apply_settings_action(enum settings_action action) {
+    static const uint32_t contexts[] = { 0u, 16u, 32u, 64u, 128u, 256u };
+    static const uint32_t maximums[] = { 8u, 16u, 32u, 64u, 128u };
+    static const uint32_t temperatures[] = { 0u, 2u, 5u, 8u, 10u };
+    if (action == SETTINGS_MULTI_TURN && chat_mode) {
+        multi_turn_enabled = !multi_turn_enabled;
+        chat_history_length = 0u;
+    } else if (action == SETTINGS_KV_CACHE && !min_spark_active()) {
+        kv_cache_enabled = !kv_cache_enabled;
+    } else if (action == SETTINGS_CONTEXT) {
+        uint32_t current = 0u;
+        while (current + 1u < sizeof(contexts) / sizeof(contexts[0]) &&
+               contexts[current] != context_tokens_setting) ++current;
+        for (uint32_t tries = 0u; tries < sizeof(contexts) / sizeof(contexts[0]); ++tries) {
+            current = (current + 1u) % (sizeof(contexts) / sizeof(contexts[0]));
+            if (!contexts[current] || contexts[current] <= active_context_capacity()) {
+                context_tokens_setting = contexts[current];
+                break;
+            }
+        }
+    } else if (action == SETTINGS_MAX_TOKENS) {
+        uint32_t current = 0u;
+        while (current + 1u < sizeof(maximums) / sizeof(maximums[0]) &&
+               maximums[current] != max_generation_tokens) ++current;
+        for (uint32_t tries = 0u; tries < sizeof(maximums) / sizeof(maximums[0]); ++tries) {
+            current = (current + 1u) % (sizeof(maximums) / sizeof(maximums[0]));
+            if (maximums[current] < effective_context_tokens()) {
+                max_generation_tokens = maximums[current];
+                break;
+            }
+        }
+    } else if (action == SETTINGS_TEMPERATURE) {
+        uint32_t current = 0u;
+        while (current + 1u < sizeof(temperatures) / sizeof(temperatures[0]) &&
+               temperatures[current] != temperature_tenths) ++current;
+        current = (current + 1u) % (sizeof(temperatures) / sizeof(temperatures[0]));
+        temperature_tenths = temperatures[current];
+    }
+}
+
+static uint32_t effort_buttons_left(void) { return fb_width - 368u; }
+
+static void gui_draw_effort(void) {
+    if (!gui_enabled || !min_spark_active() || fb_width < 560u) return;
+    uint32_t label_left = fb_width - 432u;
+    uint32_t button_left = effort_buttons_left();
+    uint32_t current = lm_arch_minspark_get_effort(&lite_model);
+    draw_text(label_left, 24u, "EFFORT", UI_MUTED, UI_SURFACE);
+    static const char *const labels[3] = {"LOW", "MED", "HIGH"};
+    for (uint32_t index = 0; index < 3u; ++index) {
+        uint32_t loops = index + 2u;
+        uint32_t left = button_left + index * 56u;
+        uint32_t background = current == loops ? UI_SELECTED : UI_HOVER;
+        uint32_t foreground = current == loops ? UI_YELLOW : UI_WHITE;
+        fill_rect(left, 12u, 52u, 32u, background);
+        draw_text(left + (index == 2u ? 10u : 14u), 24u,
+                  labels[index], foreground, background);
+    }
+}
+
+static uint32_t gui_effort_hit(int32_t x, int32_t y) {
+    if (!min_spark_active() || fb_width < 560u || y < 12 || y >= 44) return 0u;
+    uint32_t button_left = effort_buttons_left();
+    for (uint32_t index = 0; index < 3u; ++index) {
+        int32_t left = (int32_t)(button_left + index * 56u);
+        if (x >= left && x < left + 52) return index + 2u;
+    }
+    return 0u;
+}
 
 static void gui_output_begin(void) {
-    uint32_t top = 44, bottom = input_top() - 12u;
-    fill_rect(16, top, fb_width - 32u, bottom - top, UI_PANEL);
-    draw_glyph(20, top + 4, 'R', UI_INK, UI_PANEL, 1);
-    draw_glyph(28, top + 4, 'E', UI_INK, UI_PANEL, 1);
-    draw_glyph(36, top + 4, 'S', UI_INK, UI_PANEL, 1);
-    draw_glyph(44, top + 4, 'P', UI_INK, UI_PANEL, 1);
-    draw_glyph(52, top + 4, 'O', UI_INK, UI_PANEL, 1);
-    draw_glyph(60, top + 4, 'N', UI_INK, UI_PANEL, 1);
-    draw_glyph(68, top + 4, 'S', UI_INK, UI_PANEL, 1);
-    draw_glyph(76, top + 4, 'E', UI_INK, UI_PANEL, 1);
-    gui_set_region(20, top + 16, fb_width - 20u, bottom - 4u, UI_PANEL);
+    uint32_t top = 120u, bottom = input_top() - 16u;
+    fill_rect(20u, top, fb_width - 40u, bottom - top, UI_SURFACE);
+    fill_rect(20u, top, 3u, bottom - top, UI_YELLOW);
+    draw_text(36u, top + 16u, "RESPONSE", UI_MUTED, UI_SURFACE);
+    gui_foreground = UI_WHITE;
+    gui_set_region(36u, top + 40u, fb_width - 36u, bottom - 16u, UI_SURFACE);
 }
 
 static void gui_input_begin(void) {
     uint32_t top = input_top();
-    fill_rect(16, top, fb_width - 32u, fb_height - top - 16u, UI_WHITE);
-    const char *label = "PROMPT >";
-    uint32_t left = 20;
-    while (*label) { draw_glyph(left, top + 5, *label++, UI_INK, UI_WHITE, 1); left += 8; }
-    gui_set_region(20, top + 20, fb_width - 20u, fb_height - 20u, UI_WHITE);
+    fill_rect(20u, top, fb_width - 40u, fb_height - top - 20u, UI_SURFACE);
+    fill_rect(20u, top, fb_width - 40u, 1u, UI_BORDER);
+    draw_text(36u, top + 14u, "PROMPT", UI_MUTED, UI_SURFACE);
+    uint32_t button_left = fb_width - 140u;
+    fill_rect(button_left, top + 24u, 104u, 42u, UI_YELLOW);
+    draw_text(button_left + 32u, top + 41u, "SEND", UI_INK, UI_YELLOW);
+    gui_foreground = UI_WHITE;
+    gui_set_region(36u, top + 38u, button_left - 20u, fb_height - 34u, UI_SURFACE);
 }
 
 static void gui_draw_shell(void) {
-    fill_rect(0, 0, fb_width, fb_height, UI_YELLOW);
-    draw_label(16, 10, "BANANAMIND OS", 2);
-    uint32_t top = 40, in_top = input_top();
-    fill_rect(15, top + 3, fb_width - 24u, in_top - top - 5u, UI_SHADOW);
-    fill_rect(12, top, fb_width - 24u, in_top - top - 5u, UI_INK);
-    fill_rect(16, top + 4, fb_width - 32u, in_top - top - 13u, UI_PANEL);
-    fill_rect(15, in_top + 3, fb_width - 24u, fb_height - in_top - 9u, UI_SHADOW);
-    fill_rect(12, in_top, fb_width - 24u, fb_height - in_top - 12u, UI_INK);
-    fill_rect(16, in_top + 4, fb_width - 32u, fb_height - in_top - 20u, UI_WHITE);
+    pointer_saved = 0;
+    fill_rect(0, 0, fb_width, fb_height, UI_DARK);
+    fill_rect(0, 0, fb_width, 56u, UI_SURFACE);
+    fill_rect(0, 55u, fb_width, 1u, UI_BORDER);
+    draw_text(20u, 14u, "BANANAMIND", UI_YELLOW, UI_SURFACE);
+    draw_text(20u, 31u, "LOCAL CONVERSATION", UI_MUTED, UI_SURFACE);
+    if (active_entry) draw_text(190u, 22u, active_entry->name, UI_WHITE, UI_SURFACE);
+    gui_draw_effort();
+    fill_rect(fb_width - 176u, 12u, 92u, 32u, UI_HOVER);
+    draw_text(fb_width - 160u, 24u, "MODELS", UI_WHITE, UI_HOVER);
+    gui_draw_settings();
     gui_output_begin();
 }
 
 static void gui_show_tps(uint32_t tenths) {
     if (!gui_enabled) return;
-    uint32_t left = fb_width - 112u;
-    fill_rect(left, 8, 96, 20, UI_YELLOW);
+    uint32_t left = fb_width - 76u;
+    fill_rect(left, 12u, 64u, 32u, UI_SURFACE);
     const char *label = "TPS ";
-    while (*label) { draw_glyph(left, 12, *label++, UI_INK, UI_YELLOW, 1); left += 8; }
+    while (*label) { draw_glyph(left, 24u, *label++, UI_MUTED, UI_SURFACE, 1); left += 8; }
     if (tenths == 0xFFFFFFFFu) {
-        draw_glyph(left, 12, '-', UI_INK, UI_YELLOW, 1); left += 8;
-        draw_glyph(left, 12, '-', UI_INK, UI_YELLOW, 1); left += 8;
-        draw_glyph(left, 12, '.', UI_INK, UI_YELLOW, 1); left += 8;
-        draw_glyph(left, 12, '-', UI_INK, UI_YELLOW, 1);
+        draw_glyph(left, 24u, '-', UI_WHITE, UI_SURFACE, 1); left += 8;
+        draw_glyph(left, 24u, '-', UI_WHITE, UI_SURFACE, 1);
         return;
     }
     if (tenths > 999u) tenths = 999u;
     uint32_t whole = tenths / 10u;
-    if (whole >= 10u) { draw_glyph(left, 12, (char)('0' + whole / 10u), UI_INK, UI_YELLOW, 1); left += 8; }
-    draw_glyph(left, 12, (char)('0' + whole % 10u), UI_INK, UI_YELLOW, 1); left += 8;
-    draw_glyph(left, 12, '.', UI_INK, UI_YELLOW, 1); left += 8;
-    draw_glyph(left, 12, (char)('0' + tenths % 10u), UI_INK, UI_YELLOW, 1);
+    if (whole >= 10u) { draw_glyph(left, 24u, (char)('0' + whole / 10u), UI_WHITE, UI_SURFACE, 1); left += 8; }
+    draw_glyph(left, 24u, (char)('0' + whole % 10u), UI_WHITE, UI_SURFACE, 1); left += 8;
+    draw_glyph(left, 24u, '.', UI_WHITE, UI_SURFACE, 1); left += 8;
+    draw_glyph(left, 24u, (char)('0' + tenths % 10u), UI_WHITE, UI_SURFACE, 1);
 }
 
 static void gui_init(const struct multiboot_info *mb) {
@@ -392,6 +651,44 @@ static uint32_t chat_wrap(const uint8_t *input, uint32_t length) {
     for (uint32_t i = 0; suffix[i] && written < sizeof(chat_input); ++i)
         chat_input[written++] = (uint8_t)suffix[i];
     return written;
+}
+
+static void history_append(const uint8_t *bytes, uint32_t length) {
+    if (!length) return;
+    if (length >= sizeof(chat_history)) {
+        bytes += length - sizeof(chat_history);
+        length = sizeof(chat_history);
+        chat_history_length = 0u;
+    }
+    if (length > sizeof(chat_history) - chat_history_length) {
+        uint32_t remove = length - (sizeof(chat_history) - chat_history_length);
+        for (uint32_t index = remove; index < chat_history_length; ++index)
+            chat_history[index - remove] = chat_history[index];
+        chat_history_length -= remove;
+    }
+    for (uint32_t index = 0u; index < length; ++index)
+        chat_history[chat_history_length++] = bytes[index];
+}
+
+static void history_append_text(const char *text) {
+    history_append((const uint8_t *)text, text_length(text));
+}
+
+static const uint8_t *prepare_model_input(const uint8_t *input, uint32_t length,
+                                          uint32_t *model_length) {
+    if (!chat_mode) {
+        *model_length = length;
+        return input;
+    }
+    if (!multi_turn_enabled) {
+        *model_length = chat_wrap(input, length);
+        return chat_input;
+    }
+    history_append_text("<|user|>\n");
+    history_append(input, length);
+    history_append_text("\n<|assistant|>\n");
+    *model_length = chat_history_length;
+    return chat_history;
 }
 
 static int range_ok(uint32_t offset, uint32_t size, uint32_t file_size) {
@@ -768,7 +1065,8 @@ static char keyboard_char(void) {
     static const char normal[] = "\0\0331234567890-=\b\tqwertyuiop[]\n\0asdfghjkl;'`\0\\zxcvbnm,./\0*\0 ";
     static const char shifted[] = "\0\033!@#$%^&*()_+\b\tQWERTYUIOP{}\n\0ASDFGHJKL:\"~\0|ZXCVBNM<>?\0*\0 ";
     static int shift;
-    if (!(inb(0x64) & 1u)) return 0;
+    uint8_t status = inb(0x64);
+    if (!(status & 1u) || (status & 0x20u)) return 0;
     uint8_t code = inb(0x60);
     if (code == 42 || code == 54) { shift = 1; return 0; }
     if (code == 170 || code == 182) { shift = 0; return 0; }
@@ -779,6 +1077,43 @@ static char keyboard_char(void) {
 static char getc(void) {
     for (;;) {
         if (inb(0x3F8 + 5) & 1u) return (char)inb(0x3F8);
+        if (mouse_ready) {
+            mouse_poll(&mouse, fb_width, fb_height);
+            if (mouse.clicked && gui_enabled) {
+                enum settings_action settings = gui_settings_hit(mouse.x, mouse.y);
+                if (settings != SETTINGS_NONE) {
+                    pointer_restore();
+                    apply_settings_action(settings);
+                    gui_draw_settings();
+                    pointer_draw(mouse.x, mouse.y);
+                    mouse.changed = 0u;
+                    continue;
+                }
+                uint32_t effort = gui_effort_hit(mouse.x, mouse.y);
+                if (effort) {
+                    pointer_restore();
+                    lm_arch_minspark_set_effort(&lite_model, effort);
+                    gui_draw_effort();
+                    pointer_draw(mouse.x, mouse.y);
+                    mouse.changed = 0u;
+                    continue;
+                }
+                if (mouse.y >= 12 && mouse.y < 44 &&
+                    mouse.x >= (int32_t)fb_width - 176 &&
+                    mouse.x < (int32_t)fb_width - 84) {
+                    pointer_restore();
+                    return '\033';
+                }
+                if (mouse.y >= (int32_t)input_top() + 24 &&
+                    mouse.y < (int32_t)input_top() + 66 &&
+                    mouse.x >= (int32_t)fb_width - 140 &&
+                    mouse.x < (int32_t)fb_width - 36) {
+                    pointer_restore();
+                    return '\n';
+                }
+            }
+            if (mouse.changed && gui_enabled) pointer_draw(mouse.x, mouse.y);
+        }
         char c = keyboard_char();
         if (c) return c;
     }
@@ -815,6 +1150,7 @@ static uint32_t readline(uint8_t *buffer, uint32_t capacity) {
     uint32_t length = 0;
     for (;;) {
         char c = getc();
+        if (c == '\033') return 0xFFFFFFFFu;
         if (c == '\r') c = '\n';
         if (c == '\n') { putc('\n'); return length; }
         if ((c == '\b' || c == 127) && length) { --length; putc('\b'); continue; }
@@ -823,7 +1159,12 @@ static uint32_t readline(uint8_t *buffer, uint32_t capacity) {
 }
 
 static void clear(void) {
-    if (gui_enabled) { gui_draw_shell(); gui_show_tps(0xFFFFFFFFu); return; }
+    if (gui_enabled) {
+        pointer_saved = 0;
+        gui_draw_shell();
+        gui_show_tps(0xFFFFFFFFu);
+        return;
+    }
     for (uint32_t i = 0; i < VGA_WIDTH * VGA_HEIGHT; ++i) vga[i] = (uint16_t)color << 8 | ' ';
     cursor_row = cursor_col = 0;
 }
@@ -832,6 +1173,260 @@ static void reboot(void) {
     while (inb(0x64) & 2u) { }
     outb(0x64, 0xFE);
     for (;;) __asm__ volatile ("hlt");
+}
+
+static int inside(int32_t x, int32_t y, uint32_t left, uint32_t top,
+                  uint32_t width, uint32_t height) {
+    return x >= (int32_t)left && y >= (int32_t)top &&
+        x < (int32_t)(left + width) && y < (int32_t)(top + height);
+}
+
+static uint32_t number_text(uint32_t value, char *output) {
+    char reverse[11];
+    uint32_t count = 0;
+    if (!value) reverse[count++] = '0';
+    while (value) { reverse[count++] = (char)('0' + value % 10u); value /= 10u; }
+    for (uint32_t index = 0; index < count; ++index) output[index] = reverse[count - index - 1u];
+    output[count] = 0;
+    return count;
+}
+
+static uint32_t text_length(const char *text) {
+    uint32_t length = 0;
+    while (text[length]) ++length;
+    return length;
+}
+
+static void draw_model_card(const struct model_store *store, uint32_t index,
+                            uint32_t selected, uint32_t first,
+                            uint32_t list_left, uint32_t list_width,
+                            uint32_t card_height) {
+    if (index < first) return;
+    uint32_t row = index - first;
+    uint32_t visible = (fb_height - 160u) / card_height;
+    if (!visible) visible = 1u;
+    if (row >= visible || index >= store->count) return;
+    const struct model_store_entry *entry = &store->entries[index];
+    uint32_t top = 76u + row * card_height;
+    uint32_t background = index == selected ? UI_SELECTED : UI_SURFACE;
+    fill_rect(list_left, top, list_width, card_height - 6u, background);
+    fill_rect(list_left, top, index == selected ? 4u : 1u, card_height - 6u,
+              index == selected ? UI_YELLOW : UI_BORDER);
+    draw_text(list_left + 14u, top + 8u, entry->name, UI_WHITE, background);
+    draw_text(list_left + 14u, top + 27u, entry->variant, UI_YELLOW, background);
+    char memory[12];
+    number_text(entry->recommended_ram_mb, memory);
+    draw_text(list_left + 82u, top + 27u, memory, UI_MUTED, background);
+    draw_text(list_left + 82u + 8u * text_length(memory),
+              top + 27u, " MB RAM", UI_MUTED, background);
+}
+
+static void draw_model_details(const struct model_store *store, uint32_t selected,
+                               uint32_t total_ram_mb, uint32_t list_left,
+                               uint32_t list_width, uint32_t list_top) {
+    uint32_t detail_left = list_left + list_width + 22u;
+    uint32_t detail_width = fb_width - detail_left - 20u;
+    const struct model_store_entry *entry = &store->entries[selected];
+    fill_rect(detail_left, list_top, detail_width, fb_height - list_top - 76u, UI_SURFACE);
+    fill_rect(detail_left, list_top, detail_width, 3u, UI_YELLOW);
+    draw_text(detail_left + 16u, list_top + 18u, "SELECTED MODEL", UI_MUTED, UI_SURFACE);
+    draw_text(detail_left + 16u, list_top + 42u, entry->name, UI_WHITE, UI_SURFACE);
+    draw_text(detail_left + 16u, list_top + 66u, entry->variant, UI_YELLOW, UI_SURFACE);
+    draw_text(detail_left + 16u, list_top + 96u, entry->description, UI_MUTED, UI_SURFACE);
+    draw_text(detail_left + 16u, list_top + 132u,
+              entry->chat ? "CHAT MODEL" : "BASE MODEL", UI_WHITE, UI_SURFACE);
+    draw_text(detail_left + 16u, list_top + 154u,
+              entry->legacy ? "486 COMPATIBLE" : "MODERN CPU", UI_MUTED, UI_SURFACE);
+    char ram[12];
+    number_text(total_ram_mb, ram);
+    draw_text(detail_left + 16u, list_top + 190u, "SYSTEM RAM", UI_MUTED, UI_SURFACE);
+    draw_text(detail_left + 16u, list_top + 210u, ram,
+              total_ram_mb >= entry->recommended_ram_mb ? UI_GREEN : UI_RED, UI_SURFACE);
+    draw_text(detail_left + 16u + 8u * text_length(ram),
+              list_top + 210u, " MB", UI_WHITE, UI_SURFACE);
+
+    uint32_t button_top = fb_height - 58u;
+    uint32_t button_color = total_ram_mb >= entry->recommended_ram_mb ? UI_YELLOW : UI_BORDER;
+    fill_rect(detail_left, button_top, detail_width, 38u, button_color);
+    draw_text(detail_left + (detail_width > 80u ? (detail_width - 80u) / 2u : 4u),
+              button_top + 15u, "LOAD MODEL", UI_INK, button_color);
+}
+
+static void draw_model_picker(const struct model_store *store, uint32_t selected,
+                              uint32_t first, uint32_t total_ram_mb) {
+    pointer_saved = 0;
+    fill_rect(0, 0, fb_width, fb_height, UI_DARK);
+    fill_rect(0, 0, fb_width, 56u, UI_SURFACE);
+    fill_rect(0, 55u, fb_width, 1u, UI_BORDER);
+    draw_text(20, 14, "BANANAMIND", UI_YELLOW, UI_SURFACE);
+    draw_text(20, 30, "LOCAL MODEL SYSTEM", UI_MUTED, UI_SURFACE);
+    draw_text(fb_width - 152u, 20, "MODEL LIBRARY", UI_WHITE, UI_SURFACE);
+
+    uint32_t list_left = 20u;
+    uint32_t list_top = 76u;
+    uint32_t list_width = fb_width * 55u / 100u;
+    uint32_t card_height = 54u;
+    uint32_t visible = (fb_height - 160u) / card_height;
+    if (!visible) visible = 1u;
+    draw_text(list_left, 62u, "AVAILABLE ON THIS ISO", UI_MUTED, UI_DARK);
+    for (uint32_t row = 0; row < visible && first + row < store->count; ++row) {
+        uint32_t index = first + row;
+        draw_model_card(store, index, selected, first, list_left, list_width, card_height);
+    }
+    draw_model_details(store, selected, total_ram_mb, list_left, list_width, list_top);
+    draw_text(20u, fb_height - 22u, "Mouse or W/S + Enter", UI_MUTED, UI_DARK);
+}
+
+static uint32_t model_picker_graphical(const struct model_store *store,
+                                       uint32_t total_ram_mb) {
+    uint32_t selected = 0u;
+    uint32_t first = 0u;
+    uint8_t redraw = 1u;
+    uint32_t card_height = 54u;
+    uint32_t visible = (fb_height - 160u) / card_height;
+    if (!visible) visible = 1u;
+    mouse_ready = (uint8_t)mouse_init(&mouse, fb_width, fb_height);
+    for (;;) {
+        if (mouse_ready) mouse_poll(&mouse, fb_width, fb_height);
+        int32_t hovered = -1;
+        uint32_t list_width = fb_width * 55u / 100u;
+        if (inside(mouse.x, mouse.y, 20u, 76u, list_width, visible * card_height)) {
+            uint32_t row = ((uint32_t)mouse.y - 76u) / card_height;
+            if (first + row < store->count) hovered = (int32_t)(first + row);
+        }
+        if (mouse.clicked) {
+            if (hovered >= 0) {
+                uint32_t new_selected = (uint32_t)hovered;
+                if (new_selected != selected) {
+                    uint32_t old_selected = selected;
+                    pointer_restore();
+                    selected = new_selected;
+                    draw_model_card(store, old_selected, selected, first,
+                                    20u, list_width, card_height);
+                    draw_model_card(store, selected, selected, first,
+                                    20u, list_width, card_height);
+                    draw_model_details(store, selected, total_ram_mb,
+                                       20u, list_width, 76u);
+                    if (mouse_ready) pointer_draw(mouse.x, mouse.y);
+                    mouse.changed = 0u;
+                }
+            } else {
+                uint32_t detail_left = 42u + list_width;
+                if (inside(mouse.x, mouse.y, detail_left, fb_height - 58u,
+                           fb_width - detail_left - 20u, 38u)) {
+                    pointer_restore();
+                    return selected;
+                }
+            }
+        }
+        char key = keyboard_char();
+        if (key == 'w' || key == 'W' || key == 'k' || key == 'K') {
+            if (selected) --selected;
+            redraw = 1u;
+        } else if (key == 's' || key == 'S' || key == 'j' || key == 'J') {
+            if (selected + 1u < store->count) ++selected;
+            redraw = 1u;
+        } else if (key == '\n' || key == '\r') {
+            pointer_restore();
+            return selected;
+        }
+        if (selected < first) first = selected;
+        if (selected >= first + visible) first = selected - visible + 1u;
+        if (redraw) {
+            draw_model_picker(store, selected, first, total_ram_mb);
+            redraw = 0u;
+            if (mouse_ready) pointer_draw(mouse.x, mouse.y);
+        } else if (mouse_ready && mouse.changed) {
+            pointer_draw(mouse.x, mouse.y);
+        }
+    }
+}
+
+static uint32_t model_picker_text(const struct model_store *store, uint8_t legacy_only) {
+    uint8_t choices[MODEL_STORE_MAX_MODELS];
+    uint32_t count = 0;
+    clear();
+    color = 0x60;
+    puts("BANANAMIND OS - 486 COMPATIBILITY MODE\n\n");
+    puts("Models remain on the CD until selected.\n\n");
+    for (uint32_t index = 0; index < store->count && count < 36u; ++index) {
+        if (legacy_only && !store->entries[index].legacy) continue;
+        choices[count] = (uint8_t)index;
+        putc(count < 9u ? (char)('1' + count) : (char)('A' + count - 9u));
+        puts("  "); puts(store->entries[index].name); puts(" ");
+        puts(store->entries[index].variant); puts("\n");
+        ++count;
+    }
+    puts("\nSelect a model: ");
+    for (;;) {
+        char key = getc();
+        uint32_t selected = 0xFFFFFFFFu;
+        if (key >= '1' && key <= '9') selected = (uint32_t)(key - '1');
+        else if (key >= 'a' && key <= 'z') selected = 9u + (uint32_t)(key - 'a');
+        else if (key >= 'A' && key <= 'Z') selected = 9u + (uint32_t)(key - 'A');
+        if (selected < count) { putc(key); putc('\n'); return choices[selected]; }
+    }
+}
+
+static uint32_t loading_percent = 101u;
+
+static void loading_progress(uint32_t completed, uint32_t total) {
+    if (!gui_enabled || !total) return;
+    uint32_t divisor = (total + 1023u) >> 10;
+    uint32_t percent = divisor ? ((completed >> 10) * 100u / divisor) : 100u;
+    if (completed == total) percent = 100u;
+    if (percent == loading_percent) return;
+    loading_percent = percent;
+    uint32_t left = fb_width / 5u;
+    uint32_t width = fb_width - left * 2u;
+    uint32_t top = fb_height / 2u + 32u;
+    fill_rect(left, top, width, 12u, UI_BORDER);
+    fill_rect(left, top, width * percent / 100u, 12u, UI_YELLOW);
+}
+
+static void draw_loading(const struct model_store_entry *entry) {
+    if (!gui_enabled) { puts("Loading "); puts(entry->name); puts("...\n"); return; }
+    pointer_saved = 0;
+    fill_rect(0, 0, fb_width, fb_height, UI_DARK);
+    draw_text(24u, 22u, "BANANAMIND", UI_YELLOW, UI_DARK);
+    draw_text(fb_width / 5u, fb_height / 2u - 28u,
+              "LOADING SELECTED MODEL", UI_WHITE, UI_DARK);
+    draw_text(fb_width / 5u, fb_height / 2u, entry->name, UI_MUTED, UI_DARK);
+    loading_percent = 101u;
+    loading_progress(0u, 1u);
+}
+
+static int load_iso_model(const struct multiboot_info *mb,
+                          const struct model_store_entry *entry) {
+    uintptr_t memory_end = (uintptr_t)(mb->mem_upper + 1024u) * 1024u;
+    uintptr_t model_address = ((uintptr_t)&_kernel_end + 4095u) & ~(uintptr_t)4095u;
+    if (memory_end <= model_address || entry->file_size > memory_end - model_address) return 0;
+    draw_loading(entry);
+    if (!model_store_load(&iso_models, entry, (void *)model_address,
+                          (uint32_t)(memory_end - model_address), loading_progress)) return 0;
+    struct lm_arena arena;
+    uint8_t *arena_start = (uint8_t *)((model_address + entry->file_size + 15u) & ~(uintptr_t)15u);
+    arena.next = arena_start;
+    arena.end = (uint8_t *)memory_end;
+    static const uint32_t context_attempts[] = { 256u, 128u, 64u, 32u, 16u };
+    uint8_t loaded = 0u;
+    for (uint32_t attempt = 0u;
+         attempt < sizeof(context_attempts) / sizeof(context_attempts[0]); ++attempt) {
+        arena.next = arena_start;
+        if (litemodel_load_with_context(&lite_model, (const void *)model_address,
+                                        entry->file_size, &arena,
+                                        context_attempts[attempt])) {
+            loaded = 1u;
+            break;
+        }
+    }
+    if (!loaded) return 0;
+    using_litemodel = 1u;
+    active_entry = entry;
+    chat_mode = entry->chat || (lite_model.header->flags & LITEMODEL_FLAG_CHAT);
+    context_tokens_setting = 0u;
+    chat_history_length = 0u;
+    return 1;
 }
 
 static void return_after_ram_error(const char *detail) {
@@ -863,86 +1458,275 @@ static void fatal(const char *message) {
     for (;;) __asm__ volatile ("hlt");
 }
 
+static int command_line_has(const struct multiboot_info *mb, const char *wanted) {
+    if (!(mb->flags & MULTIBOOT_INFO_CMDLINE) || !mb->cmdline) return 0;
+    const char *line = (const char *)mb->cmdline;
+    uint32_t length = text_length(wanted);
+    while (*line) {
+        uint32_t index = 0;
+        while (index < length && line[index] == wanted[index]) ++index;
+        if (index == length) return 1;
+        ++line;
+    }
+    return 0;
+}
+
+static void active_reset(uint32_t legacy_refresh_floats) {
+    if (using_litemodel) {
+        litemodel_reset(&lite_model);
+    } else {
+        for (uint32_t index = 0; index < legacy_refresh_floats; ++index)
+            refresh_history[index] = 0.0f;
+    }
+}
+
+static uint32_t active_tokenize(const uint8_t *input, uint32_t length,
+                                uint16_t **tokens, uint32_t capacity) {
+    if (using_litemodel) {
+        *tokens = lite_model.prompt_tokens;
+        return litemodel_tokenize(&lite_model, input, length, *tokens, capacity);
+    }
+    *tokens = prompt_tokens;
+    return tokenize(input, length, *tokens, capacity);
+}
+
+static uint16_t active_forward(uint16_t token, uint32_t position) {
+    return using_litemodel ? litemodel_forward(&lite_model, token, position)
+                           : forward(token, position);
+}
+
+static uint8_t active_uses_sequence(void) {
+    return using_litemodel &&
+        lite_model.header->architecture == LITEMODEL_ARCH_MINSPARK;
+}
+
+static uint32_t active_eos(void) {
+    return using_litemodel ? lite_model.header->eos_id : net.header->eos_id;
+}
+
+static uint32_t next_random(void) {
+    random_state ^= random_state << 13;
+    random_state ^= random_state >> 17;
+    random_state ^= random_state << 5;
+    return random_state;
+}
+
+static uint16_t active_sample(void) {
+    if (using_litemodel)
+        return litemodel_sample(&lite_model, temperature_tenths, next_random());
+    uint16_t best = 0u;
+    for (uint32_t index = 1u; index < net.header->vocab_size; ++index)
+        if (logits[index] > logits[best]) best = (uint16_t)index;
+    if (!temperature_tenths) return best;
+    float temperature = (float)temperature_tenths / 10.0f;
+    float maximum = logits[best], total = 0.0f;
+    for (uint32_t index = 0u; index < net.header->vocab_size; ++index)
+        total += lm_exp((logits[index] - maximum) / temperature);
+    float target = ((float)(next_random() & 0x00FFFFFFu) / 16777216.0f) * total;
+    float cumulative = 0.0f;
+    for (uint32_t index = 0u; index < net.header->vocab_size; ++index) {
+        cumulative += lm_exp((logits[index] - maximum) / temperature);
+        if (cumulative >= target) return (uint16_t)index;
+    }
+    return best;
+}
+
+static void active_store_token(uint16_t id) {
+    if (!chat_mode || !multi_turn_enabled) return;
+    if (using_litemodel) {
+        if (id == lite_model.header->bos_id || id == lite_model.header->eos_id ||
+            id == lite_model.header->pad_id) return;
+        const struct litemodel_token *token = litemodel_token(&lite_model, id);
+        if (token) history_append(lite_model.token_data + token->offset, token->length);
+        return;
+    }
+    if (id == net.header->bos_id || id == net.header->eos_id || id == net.header->pad_id)
+        return;
+    if (id < net.header->vocab_size) {
+        const struct bm2n_token *token = &net.tokens[id];
+        history_append(net.token_data + token->offset, token->length);
+    }
+}
+
+static void active_print_token(uint16_t id) {
+    if (!using_litemodel) { print_token(id); return; }
+    if (id == lite_model.header->bos_id || id == lite_model.header->eos_id ||
+        id == lite_model.header->pad_id) return;
+    const struct litemodel_token *token = litemodel_token(&lite_model, id);
+    if (!token) return;
+    for (uint32_t index = 0; index < token->length; ++index) {
+        uint8_t character = lite_model.token_data[token->offset + index];
+        if (character == '\n' || character == '\t' || character >= 32u)
+            putc((char)character);
+    }
+}
+
+static void show_model_load_error(void) {
+    if (gui_enabled) {
+        pointer_saved = 0;
+        fill_rect(0, 0, fb_width, fb_height, UI_DARK);
+        draw_text(24u, 24u, "MODEL COULD NOT BE LOADED", UI_RED, UI_DARK);
+        draw_text(24u, 52u, "The file is invalid, unsupported, or RAM is insufficient.",
+                  UI_WHITE, UI_DARK);
+        draw_text(24u, 84u, "Press Enter to return to the model library.",
+                  UI_MUTED, UI_DARK);
+    } else {
+        puts("\nModel could not be loaded. Press Enter to return.\n");
+    }
+    for (;;) {
+        char key = getc();
+        if (key == '\n' || key == '\r') break;
+    }
+}
+
+static void choose_iso_model(const struct multiboot_info *mb, uint32_t total_mb) {
+    for (;;) {
+        uint32_t selected = gui_enabled ? model_picker_graphical(&iso_models, total_mb)
+                                        : model_picker_text(&iso_models, compatibility_mode);
+        if (load_iso_model(mb, &iso_models.entries[selected])) return;
+        show_model_load_error();
+    }
+}
+
 void kernel_main(uint32_t magic, const struct multiboot_info *mb) {
-    serial_init(); fpu_init();
-    if (magic == MULTIBOOT_BOOTLOADER_MAGIC) gui_init(mb);
-    clear();
-    puts("============================================================\n");
-    puts("                    BananaMind OS\n");
-    puts("          local intelligence for the Intel 486\n");
-    puts("============================================================\n\n");
+    serial_init();
+    fpu_init();
+    math_backend = cpu_initialize_math();
+    lm_matvec_configure(math_backend);
     if (magic != MULTIBOOT_BOOTLOADER_MAGIC) fatal("not loaded by a Multiboot bootloader");
     if (!(mb->flags & MULTIBOOT_INFO_MEMORY)) fatal("bootloader did not provide a memory size");
-    if (!(mb->flags & MULTIBOOT_INFO_MODS) || mb->mods_count != 1) fatal("select one model module in the boot menu");
-    const struct multiboot_module *module = (const struct multiboot_module *)mb->mods_addr;
-    chat_mode = module->string && begins_with_chat((const char *)module->string);
-    if (!load_model((const uint8_t *)module->start, module->end - module->start)) fatal("invalid or incompatible BM2NQ model");
-
     uint32_t total_kb = mb->mem_upper + 1024u;
     uint32_t total_mb = (total_kb + 1023u) / 1024u;
-    uint32_t needed_mb;
-    if (net.kind == MODEL_MICRO2)
-        needed_mb = net.header->bits == 4u ? 4u : (net.header->bits == 8u ? 5u : 8u);
-    else if (net.kind == MODEL_MICRO_V1)
-        needed_mb = net.header->bits == 16u ? 4u : 6u;
-    else if (net.header->hidden_size == 384u)
-        needed_mb = net.header->bits == 2u ? 12u : 20u;
-    else needed_mb = net.header->bits == 8u ? 14u : (net.header->bits == 4u ? 8u : 6u);
-    puts("Model: ");
-    if (net.kind == MODEL_MICRO2) puts("BananaMind-2-Micro");
-    else if (net.kind == MODEL_MICRO_V1) puts("MicroBananaMind-v1");
-    else if (net.header->hidden_size == 384u) puts("BananaMind-2-Mini");
-    else { puts("BananaMind-2-Nano"); if (chat_mode) puts("-Chat"); }
-    puts(net.header->bits <= 8u ? " Q" : " F"); putu(net.header->bits);
-    puts(" | RAM: "); putu(total_mb); puts(" MB | context: 64\n");
-    /* PC firmware reserves a small EBDA/ROM window; allow the usual 256 KiB. */
-    if (total_kb + 256u < needed_mb * 1024u) {
-        uint32_t shortfall = needed_mb * 1024u - (total_kb + 256u);
-        if (shortfall <= 2048u) low_ram_warning(total_mb, needed_mb);
-        else return_after_ram_error("This model is far below its minimum memory requirement.");
+    compatibility_mode = (uint8_t)command_line_has(mb, "ui=compat");
+    if (!compatibility_mode) gui_init(mb);
+
+    uint32_t refresh_floats = 0u;
+    uint8_t store_mode = 0u;
+    if ((mb->flags & MULTIBOOT_INFO_MODS) && mb->mods_count == 1u) {
+        /* Legacy ultra-loader/BM2N path. GRUB entries never use a module. */
+        clear();
+        const struct multiboot_module *module = (const struct multiboot_module *)mb->mods_addr;
+        chat_mode = module->string && begins_with_chat((const char *)module->string);
+        if (!load_model((const uint8_t *)module->start, module->end - module->start))
+            fatal("invalid or incompatible legacy BM2NQ model");
+        uint32_t needed_mb;
+        if (net.kind == MODEL_MICRO2)
+            needed_mb = net.header->bits == 4u ? 4u : (net.header->bits == 8u ? 5u : 8u);
+        else if (net.kind == MODEL_MICRO_V1)
+            needed_mb = net.header->bits == 16u ? 4u : 6u;
+        else if (net.header->hidden_size == 384u)
+            needed_mb = net.header->bits == 2u ? 12u : 20u;
+        else needed_mb = net.header->bits == 8u ? 14u : (net.header->bits == 4u ? 8u : 6u);
+        if (total_kb + 256u < needed_mb * 1024u) {
+            uint32_t shortfall = needed_mb * 1024u - (total_kb + 256u);
+            if (shortfall <= 2048u) low_ram_warning(total_mb, needed_mb);
+            else return_after_ram_error("This legacy model is below its memory requirement.");
+        }
+        uintptr_t arena = (module->end + 15u) & ~15u;
+        uint32_t cache_floats = net.header->num_layers * BM2N_CONTEXT *
+            net.header->num_kv_heads * net.header->head_dim;
+        refresh_floats = net.kind == MODEL_MICRO2 ?
+            net.header->num_layers * net.header->hidden_size * (REFRESH_KERNEL - 1u) : 0u;
+        uintptr_t arena_end = arena +
+            (uintptr_t)(cache_floats * 2u + refresh_floats) * sizeof(float);
+        if (arena_end > (uintptr_t)(mb->mem_upper + 1024u) * 1024u)
+            return_after_ram_error("There is no safe contiguous space for the KV cache.");
+        key_cache = (float *)arena;
+        value_cache = key_cache + cache_floats;
+        refresh_history = value_cache + cache_floats;
+    } else {
+        if (!model_store_open(&iso_models)) {
+            clear();
+            fatal("the ISO model catalog or ATAPI CD drive was not found");
+        }
+        store_mode = 1u;
+        choose_iso_model(mb, total_mb);
     }
-    uintptr_t arena = (module->end + 15u) & ~15u;
-    uint32_t cache_floats = net.header->num_layers * BM2N_CONTEXT *
-        net.header->num_kv_heads * net.header->head_dim;
-    uint32_t refresh_floats = net.kind == MODEL_MICRO2 ?
-        net.header->num_layers * net.header->hidden_size * (REFRESH_KERNEL - 1u) : 0u;
-    uintptr_t arena_end = arena + (uintptr_t)(cache_floats * 2u + refresh_floats) * sizeof(float);
-    if (arena_end > (uintptr_t)(mb->mem_upper + 1024u) * 1024u)
-        return_after_ram_error("There is no safe contiguous space for the model KV cache.");
-    key_cache = (float *)arena;
-    value_cache = key_cache + cache_floats;
-    refresh_history = value_cache + cache_floats;
-    color = 0x0A; puts("Model ready. Enter a prompt; BananaMind streams exactly 16 tokens.\n");
+
+conversation_ready:
+    clear();
+    color = 0x0A;
+    puts("Model: ");
+    if (using_litemodel) {
+        puts(active_entry->name); puts(" "); puts(active_entry->variant);
+    } else {
+        if (net.kind == MODEL_MICRO2) puts("BananaMind-2-Micro");
+        else if (net.kind == MODEL_MICRO_V1) puts("MicroBananaMind-v1");
+        else if (net.header->hidden_size == 384u) puts("BananaMind-2-Mini");
+        else { puts("BananaMind-2-Nano"); if (chat_mode) puts("-Chat"); }
+    }
+    puts(" | RAM: "); putu(total_mb); puts(" MB | math: ");
+    puts(cpu_math_name(math_backend)); puts(" | context: ");
+    putu(active_context_capacity()); puts("\n");
+    puts("Ready. Enter a prompt. GUI controls configure conversation and generation.\n");
     color = 0x0F;
     static uint8_t input[MAX_INPUT_BYTES];
     for (;;) {
         if (gui_enabled) gui_input_begin();
         puts(gui_enabled ? "" : "\nbanana> ");
         uint32_t input_length = readline(input, sizeof(input));
+        if (input_length == 0xFFFFFFFFu) {
+            if (store_mode) {
+                choose_iso_model(mb, total_mb);
+                goto conversation_ready;
+            }
+            continue;
+        }
         if (!input_length) continue;
-        const uint8_t *model_input = input;
-        uint32_t model_input_length = input_length;
-        if (chat_mode) { model_input_length = chat_wrap(input, input_length); model_input = chat_input; }
-        for (uint32_t i = 0; i < refresh_floats; ++i) refresh_history[i] = 0.0f;
-        uint32_t count = tokenize(model_input, model_input_length, prompt_tokens, BM2N_CONTEXT - 16u);
+        uint32_t model_input_length = 0u;
+        const uint8_t *model_input = prepare_model_input(input, input_length,
+                                                         &model_input_length);
+        uint32_t context_tokens = effective_context_tokens();
+        uint32_t reserved = max_generation_tokens;
+        if (reserved >= context_tokens) reserved = context_tokens - 1u;
+        uint32_t prompt_capacity = context_tokens - reserved;
+        active_reset(refresh_floats);
+        uint16_t *active_tokens;
+        uint32_t count = active_tokenize(model_input, model_input_length,
+                                         &active_tokens, prompt_capacity);
         if (gui_enabled) gui_output_begin();
         puts(gui_enabled ? "Generating...\n\n" : "\n");
         uint16_t next = 0;
-        for (uint32_t pos = 0; pos < count; ++pos) next = forward(prompt_tokens[pos], pos);
+        uint8_t sequence_runtime = active_uses_sequence();
+        if (sequence_runtime) {
+            litemodel_forward_sequence(&lite_model, active_tokens, count);
+        } else {
+            for (uint32_t pos = 0; pos < count; ++pos)
+                active_forward(active_tokens[pos], pos);
+        }
+        next = active_sample();
         if (gui_enabled) gui_output_begin();
         gui_show_tps(0xFFFFFFFFu);
         uint32_t generation_start = rtc_seconds();
         uint32_t generated_count = 0;
-        for (uint32_t generated = 0; generated < 16u; ++generated) {
-            uint32_t pos = count + generated;
-            if (generated) next = forward(next, pos - 1u);
-            print_token(next);
+        uint32_t generation_limit = max_generation_tokens;
+        if (generation_limit > context_tokens - count)
+            generation_limit = context_tokens - count;
+        random_state ^= generation_start + input_length + count;
+        for (uint32_t generated = 0; generated < generation_limit; ++generated) {
+            active_print_token(next);
+            active_store_token(next);
             ++generated_count;
             uint32_t now = rtc_seconds();
             uint32_t elapsed = now >= generation_start ? now - generation_start : now + 86400u - generation_start;
             if (elapsed) gui_show_tps(generated_count * 10u / elapsed);
-            if (next == net.header->eos_id) break;
+            if (next == active_eos()) break;
+            uint32_t sequence_count = count + generated + 1u;
+            active_tokens[sequence_count - 1u] = next;
+            if (sequence_runtime || !kv_cache_enabled) {
+                active_reset(refresh_floats);
+                if (sequence_runtime) {
+                    litemodel_forward_sequence(&lite_model, active_tokens, sequence_count);
+                } else {
+                    for (uint32_t position = 0u; position < sequence_count; ++position)
+                        active_forward(active_tokens[position], position);
+                }
+            } else {
+                active_forward(next, sequence_count - 1u);
+            }
+            next = active_sample();
         }
+        if (chat_mode && multi_turn_enabled) history_append_text("\n");
         uint32_t generation_end = rtc_seconds();
         uint32_t elapsed = generation_end >= generation_start ? generation_end - generation_start
                                                                : generation_end + 86400u - generation_start;

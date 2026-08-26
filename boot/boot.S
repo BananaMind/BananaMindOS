@@ -1,5 +1,9 @@
 .set MB_MAGIC,    0x1BADB002
+#ifdef COMPATIBILITY_KERNEL
+.set MB_FLAGS,    0x00000003
+#else
 .set MB_FLAGS,    0x00000007
+#endif
 .set MB_CHECKSUM, -(MB_MAGIC + MB_FLAGS)
 
 .section .multiboot, "a"
@@ -7,11 +11,13 @@
 .long MB_MAGIC
 .long MB_FLAGS
 .long MB_CHECKSUM
-/* Ask the Multiboot loader for a small linear 8-bit graphics framebuffer. */
+#ifndef COMPATIBILITY_KERNEL
+/* Modern UI target. Compatibility mode deliberately ignores the framebuffer. */
 .long 0
-.long 640
-.long 480
-.long 8
+.long 0
+.long 0
+.long 32
+#endif
 
 .section .bss
 .align 16
