@@ -1,3 +1,4 @@
 /build/
+/video/
 __pycache__/
 *.pyc
