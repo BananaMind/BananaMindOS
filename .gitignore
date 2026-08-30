@@ -1,4 +1,5 @@
 /build/
 /video/
+/dev_folder/
 __pycache__/
 *.pyc

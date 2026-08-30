@@ -395,8 +395,8 @@ static void run_block(struct lm_runtime *runtime, struct ms_state *state,
     }
 }
 
-uint16_t lm_arch_minspark_forward(struct lm_runtime *runtime,
-                                  const uint16_t *tokens, uint32_t count) {
+uint32_t lm_arch_minspark_forward(struct lm_runtime *runtime,
+                                  const uint32_t *tokens, uint32_t count) {
     struct ms_state *state = runtime->architecture_state;
     const struct litemodel_header *header = runtime->header;
     if (!state || !count || count > runtime->context_capacity) return 0u;
@@ -422,9 +422,9 @@ uint16_t lm_arch_minspark_forward(struct lm_runtime *runtime,
     float *last = &state->x[(count - 1u) * hidden];
     lm_rms_norm(runtime, state->normalized, last, state->final_norm, hidden);
     lm_matvec(&state->embedding, state->normalized, state->logits);
-    uint16_t best = 0u;
+    uint32_t best = 0u;
     for (uint32_t index = 1; index < header->vocab_size; ++index)
-        if (state->logits[index] > state->logits[best]) best = (uint16_t)index;
+        if (state->logits[index] > state->logits[best]) best = index;
     return best;
 }
 

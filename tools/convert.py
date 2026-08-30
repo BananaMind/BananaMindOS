@@ -19,6 +19,15 @@ import tempfile
 import zlib
 from pathlib import Path
 
+try:
+    from .quantization import (
+        SUPPORTED_BITS, pack_quantized, quantization_divisor, quantize_value,
+    )
+except ImportError:
+    from quantization import (
+        SUPPORTED_BITS, pack_quantized, quantization_divisor, quantize_value,
+    )
+
 MAGIC = b"BM2NQ\r\n\x1a"
 VERSION = 1
 HEADER = struct.Struct("<8s12I2f12I")
@@ -82,18 +91,6 @@ def write_vector(out, sf: SafeTensorFile, name: str, size: int):
     out.write(values.tobytes())
 
 
-def quantize_value(value: float, scale: float, bits: int) -> int:
-    if scale == 0.0:
-        return 0
-    if bits == 8:
-        return max(-127, min(127, round(value / scale)))
-    if bits == 4:
-        return max(-7, min(7, round(value / scale)))
-    # Symmetric ternary weights in a two-bit container: -1, 0, +1.
-    ratio = value / scale
-    return -1 if ratio < -0.5 else (1 if ratio > 0.5 else 0)
-
-
 def write_matrix(out, sf: SafeTensorFile, name: str, rows: int, cols: int, bits: int):
     shape, values = sf.tensor(name)
     if shape != [rows, cols]:
@@ -116,20 +113,12 @@ def write_matrix(out, sf: SafeTensorFile, name: str, rows: int, cols: int, bits:
         start = row * cols
         row_values = values[start : start + cols]
         maximum = max((abs(x) for x in row_values), default=0.0)
-        divisor = 127.0 if bits == 8 else (7.0 if bits == 4 else 1.0)
-        scale = maximum / divisor if maximum else 1.0
+        divisor = float(quantization_divisor(bits))
+        scale = maximum / divisor if maximum else 0.0
         out.write(struct.pack("<f", scale))
-        packed = bytearray(packed_size)
-        if bits == 8:
-            for i, value in enumerate(row_values):
-                packed[i] = quantize_value(value, scale, bits) & 0xFF
-        elif bits == 4:
-            for i, value in enumerate(row_values):
-                packed[i >> 1] |= (quantize_value(value, scale, bits) & 0xF) << ((i & 1) * 4)
-        else:
-            for i, value in enumerate(row_values):
-                code = quantize_value(value, scale, bits) + 1
-                packed[i >> 2] |= code << ((i & 3) * 2)
+        packed = pack_quantized(row_values, scale, bits)
+        if len(packed) != packed_size:
+            raise AssertionError("packed quantized row has the wrong size")
         out.write(packed)
 
 
@@ -263,8 +252,8 @@ def convert(model: Path, tokenizer: Path, config_path: Path, output: Path, bits:
     absent = required - config.keys()
     if absent:
         raise ValueError(f"config is missing {sorted(absent)}")
-    if bits not in (2, 4, 8, 16, 32):
-        raise ValueError("bits must be 2, 4, 8, 16, or 32")
+    if bits not in SUPPORTED_BITS:
+        raise ValueError("bits must be Q1-Q8, FP16, or FP32")
     config.setdefault("head_dim", config["hidden_size"] // config["num_attention_heads"])
 
     sf = SafeTensorFile(model)
@@ -347,7 +336,7 @@ def main():
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--tokenizer", required=True, type=Path)
     parser.add_argument("--config", required=True, type=Path)
-    parser.add_argument("--bits", required=True, type=int, choices=(2, 4, 8, 16, 32))
+    parser.add_argument("--bits", required=True, type=int, choices=SUPPORTED_BITS)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     convert(args.model, args.tokenizer, args.config, args.output, args.bits)

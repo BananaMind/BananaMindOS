@@ -304,3 +304,33 @@ int model_store_load(const struct model_store *store,
     }
     return 1;
 }
+
+int model_store_find_file(const struct model_store *store, const char *path,
+                          struct model_store_file *file) {
+    struct iso_file found;
+    if (!store || !path || !file || !iso_find(store, path, &found) || found.directory)
+        return 0;
+    file->extent = found.extent;
+    file->size = found.size;
+    return 1;
+}
+
+int model_store_read_file(const struct model_store *store,
+                          const struct model_store_file *file,
+                          uint32_t offset, void *destination_, uint32_t count) {
+    uint8_t *destination = destination_;
+    if (!store || !file || (!destination && count) || offset > file->size ||
+        count > file->size - offset) return 0;
+    while (count) {
+        uint32_t within = offset % ATAPI_SECTOR_SIZE;
+        uint32_t chunk = ATAPI_SECTOR_SIZE - within;
+        if (chunk > count) chunk = count;
+        if (!atapi_read(store->io_base, store->drive,
+                        file->extent + offset / ATAPI_SECTOR_SIZE, sector_buffer)) return 0;
+        copy_bytes(destination, sector_buffer + within, chunk);
+        destination += chunk;
+        offset += chunk;
+        count -= chunk;
+    }
+    return 1;
+}

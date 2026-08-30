@@ -30,15 +30,18 @@ special token IDs, section offsets, and a CRC-32 covering the payload.
 Vectors such as RMSNorm weights and scalar refresh alphas remain float32.
 Matrices use `[out_features, in_features]` row order and no row padding.
 
-- Q8: each row is a float32 scale plus signed bytes in `[-127,127]`.
-- Q4: each row is a float32 scale plus signed nibbles in `[-7,7]`, low first.
+- Q1: each row is a float32 scale plus binary signs for `-scale/+scale`.
 - Q2: each row is a float32 scale plus two-bit ternary codes; 0/1/2 decode to
   `-1/0/+1`, while code 3 is reserved.
+- Q3 through Q8: each row is a float32 scale plus a dense little-endian bit
+  stream of two's-complement values. The symmetric ranges are `[-3,3]`,
+  `[-7,7]`, `[-15,15]`, `[-31,31]`, `[-63,63]`, and `[-127,127]`;
+  the most-negative code at each width is unused.
 - FP16: raw little-endian IEEE-754 binary16 matrix elements.
 - FP32: raw little-endian IEEE-754 binary32 matrix elements.
 
-For quantized rows, `scale = max(abs(row))/divisor`, where the divisor is 127
-for Q8, 7 for Q4, and 1 for Q2.
+For quantized rows, `scale = max(abs(row))/divisor`. The divisor is 1 for Q1
+and Q2, then `2^(bits-1)-1` for Q3 through Q8.
 
 ## Architecture tensor order
 

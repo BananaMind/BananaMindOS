@@ -4,7 +4,8 @@
 #include <stdint.h>
 
 #define LITEMODEL_MAGIC "LITEMDL\032"
-#define LITEMODEL_VERSION 1u
+#define LITEMODEL_VERSION 2u
+#define LITEMODEL_MIN_VERSION 1u
 
 enum litemodel_architecture {
     LITEMODEL_ARCH_BANANA = 1,
@@ -12,11 +13,26 @@ enum litemodel_architecture {
     LITEMODEL_ARCH_GPTX2 = 3,
     LITEMODEL_ARCH_ROSE_X1 = 4,
     LITEMODEL_ARCH_MINSPARK = 5,
+    LITEMODEL_ARCH_LFM2 = 6,
+    LITEMODEL_ARCH_GEMMA3 = 7,
+    LITEMODEL_ARCH_QWEN35 = 8,
 };
 
 enum litemodel_flags {
     LITEMODEL_FLAG_CHAT = 1u << 0,
     LITEMODEL_FLAG_TIED_EMBEDDING = 1u << 1,
+    LITEMODEL_FLAG_SPACE_TO_MARKER = 1u << 2,
+    LITEMODEL_FLAG_NO_BOS = 1u << 3,
+    LITEMODEL_FLAG_CHAT_STYLE_SHIFT = 8u,
+    LITEMODEL_FLAG_CHAT_STYLE_MASK = 15u << LITEMODEL_FLAG_CHAT_STYLE_SHIFT,
+};
+
+enum litemodel_chat_style {
+    LITEMODEL_CHAT_BANANA = 0,
+    LITEMODEL_CHAT_CHATML = 1,
+    LITEMODEL_CHAT_SMOLLM = 2,
+    LITEMODEL_CHAT_QWEN35 = 3,
+    LITEMODEL_CHAT_LFM2 = 4,
 };
 
 /*
@@ -61,14 +77,27 @@ struct __attribute__((packed)) litemodel_header {
 struct __attribute__((packed)) litemodel_token {
     uint32_t offset;
     uint16_t length;
-    uint16_t reserved;
+    uint16_t flags;
 };
 
-struct __attribute__((packed)) litemodel_merge {
+enum litemodel_token_flags {
+    LITEMODEL_TOKEN_SPECIAL = 1u << 0,
+};
+
+struct __attribute__((packed)) litemodel_merge_v1 {
     uint16_t left;
     uint16_t right;
     uint16_t result;
     uint16_t rank;
+};
+
+/* Version 2 widens tokenizer IDs and ranks without changing the header or
+   vocabulary-index records.  Version 1 files remain loadable. */
+struct __attribute__((packed)) litemodel_merge {
+    uint32_t left;
+    uint32_t right;
+    uint32_t result;
+    uint32_t rank;
 };
 
 #endif

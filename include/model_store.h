@@ -25,6 +25,11 @@ struct model_store {
     struct model_store_entry entries[MODEL_STORE_MAX_MODELS];
 };
 
+struct model_store_file {
+    uint32_t extent;
+    uint32_t size;
+};
+
 typedef void (*model_store_progress)(uint32_t completed, uint32_t total);
 
 int model_store_open(struct model_store *store);
@@ -32,5 +37,10 @@ int model_store_load(const struct model_store *store,
                      const struct model_store_entry *entry,
                      void *destination, uint32_t capacity,
                      model_store_progress progress);
+int model_store_find_file(const struct model_store *store, const char *path,
+                          struct model_store_file *file);
+int model_store_read_file(const struct model_store *store,
+                          const struct model_store_file *file,
+                          uint32_t offset, void *destination, uint32_t count);
 
 #endif

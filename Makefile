@@ -5,9 +5,13 @@ PYTHON   ?= python3
 BUILD    := build
 ISO_DIR  := $(BUILD)/iso
 LITE_ISO_DIR := $(BUILD)/litemodel-iso
+HQ_ASSET_DIR := $(BUILD)/hq-assets
 ULTRA_ISO_DIR := $(BUILD)/ultra-iso
 UEFI_BUILD := $(BUILD)/uefi
 UEFI_ISO_DIR := $(BUILD)/uefi-iso
+DOSBOXX_BOOT := $(BUILD)/bananamind-dosboxx.img
+DOSBOXX_MODELS := $(BUILD)/bananamind-dosboxx-micro-q4.iso
+DOSBOXX_NANO_CHAT_MODELS := $(BUILD)/bananamind-dosboxx-nano-chat-q4.iso
 HF_DIR   := $(BUILD)/hf
 MODEL_ID := BananaMind/BananaMind-2-Nano
 NANO_REV := c8564d1bd3f6177221ed7e4f63ae5f281a677a1c
@@ -21,6 +25,13 @@ MICRO2_BASE := https://huggingface.co/BananaMind/BananaMind-2-Micro/resolve/dbc8
 HF_MICROV1_DIR := $(BUILD)/hf-microv1
 MICROV1_BASE := https://huggingface.co/BananaMind/MicroBananaMind-v1/resolve/2dd299a219ffabc05bfcd39862e9293c68d3ef92
 HF_MINI_DIR := $(BUILD)/hf-mini
+
+# dev_folder is deliberately ignored. In the maintainer checkout, every Make
+# invocation bumps BUILD_NUMBER before Make evaluates compilation dependencies.
+CURRENT_BUILD := $(shell $(PYTHON) tools/update_build_number.py)
+ifneq ($(wildcard dev_folder),)
+$(info BananaMindOS developer build $(CURRENT_BUILD))
+endif
 MINI_BASE := https://huggingface.co/BananaMind/BananaMind-2-Mini/resolve/6400d0a6dcbe52f3c725291cb97c079c591c05a4
 
 CFLAGS_COMMON := -m32 \
@@ -48,14 +59,14 @@ endif
 CFLAGS_GUI := $(CFLAGS_COMMON) -march=$(GUI_ARCH) -mtune=$(GUI_ARCH) $(GUI_FLOAT_FLAGS)
 CFLAGS_486 := $(CFLAGS_COMMON) -march=i486 -mtune=i486 -mfpmath=387 -m80387 -DCOMPATIBILITY_KERNEL=1
 LDFLAGS := -m elf_i386 -T linker.ld -nostdlib
-RUNTIME_NAMES := cpu litemodel transformer model_store mouse arch_banana arch_llama arch_gptx arch_rose arch_minspark
+RUNTIME_NAMES := cpu litemodel transformer model_store mouse arch_banana arch_llama arch_gptx arch_rose arch_minspark arch_lfm2 arch_gemma3 arch_qwen35
 GUI_BUILD := $(BUILD)/gui-$(GUI_CPU)
-GUI_OBJS := $(addprefix $(GUI_BUILD)/,$(addsuffix .o,$(RUNTIME_NAMES)))
+GUI_OBJS := $(addprefix $(GUI_BUILD)/,$(addsuffix .o,$(RUNTIME_NAMES))) $(GUI_BUILD)/qoi.o
 GUI_KERNEL := $(BUILD)/kernel-$(GUI_CPU).elf
 COMPAT_OBJS := $(addprefix $(BUILD)/compat/,$(addsuffix .o,$(RUNTIME_NAMES)))
 SIMD_BUILD := $(BUILD)/simd
 SIMD_OBJS := $(SIMD_BUILD)/matvec-sse.o $(SIMD_BUILD)/matvec-sse2.o
-UEFI_RUNTIME_NAMES := litemodel transformer mouse arch_banana arch_llama arch_gptx arch_rose arch_minspark
+UEFI_RUNTIME_NAMES := litemodel transformer mouse arch_banana arch_llama arch_gptx arch_rose arch_minspark arch_lfm2 arch_gemma3 arch_qwen35
 UEFI_RUNTIME_OBJS := $(addprefix $(UEFI_BUILD)/,$(addsuffix .o,$(UEFI_RUNTIME_NAMES)))
 UEFI_SIMD_OBJS := $(UEFI_BUILD)/matvec-sse.o $(UEFI_BUILD)/matvec-sse2.o
 UEFI_CFLAGS := -I/usr/include/efi -I/usr/include/efi/x86_64 -Iinclude -Isrc \
@@ -65,9 +76,9 @@ UEFI_CFLAGS := -I/usr/include/efi -I/usr/include/efi/x86_64 -Iinclude -Isrc \
 UEFI_LDFLAGS := -nostdlib -znocombreloc -T /usr/lib/elf_x86_64_efi.lds \
 	-shared -Bsymbolic
 
-.PHONY: all iso uefi-iso ultra kernel uefi-app models models-extra litemodels download download-extra preset-isos \
+.PHONY: all iso uefi-iso ultra dosboxx dosboxx-nano-chat kernel uefi-app hq-assets models models-extra litemodels download download-extra preset-isos \
 	preset-10 preset-25 preset-100 preset-250 run run-2 run-4 run-8 run-uefi \
-	run-micro run-microv1 run-mini run-ultra host-chat host-base host-micro host-microv1 host-mini clean check
+	run-micro run-microv1 run-mini run-ultra run-dosboxx host-chat host-base host-micro host-microv1 host-mini clean check
 
 all: iso
 
@@ -80,17 +91,19 @@ $(GUI_BUILD)/boot.o: boot/boot.S | $(GUI_BUILD)
 $(BUILD)/compat/boot.o: boot/boot.S | $(BUILD)/compat
 	$(CC) $(CFLAGS_486) -c $< -o $@
 
-$(GUI_BUILD)/%.o: src/%.c src/font8x8.h include/bm2n.h include/litemodel.h include/litemodel_runtime.h | $(GUI_BUILD)
+$(GUI_BUILD)/%.o: src/%.c src/font8x8.h include/bm2n.h include/cursor_bitmap.h include/litemodel.h include/litemodel_runtime.h include/model_store.h include/qoi.h include/quantization.h | $(GUI_BUILD)
 	$(CC) $(CFLAGS_GUI) -c $< -o $@
 
-$(BUILD)/compat/%.o: src/%.c src/font8x8.h include/bm2n.h include/litemodel.h include/litemodel_runtime.h | $(BUILD)/compat
+$(BUILD)/compat/%.o: src/%.c src/font8x8.h include/bm2n.h include/cursor_bitmap.h include/litemodel.h include/litemodel_runtime.h include/model_store.h include/qoi.h include/quantization.h | $(BUILD)/compat
 	$(CC) $(CFLAGS_486) -c $< -o $@
 
-$(SIMD_BUILD)/matvec-sse.o: src/matvec_simd.c include/litemodel_runtime.h | $(SIMD_BUILD)
+$(GUI_BUILD)/kernel.o $(BUILD)/compat/kernel.o: include/build_number.h
+
+$(SIMD_BUILD)/matvec-sse.o: src/matvec_simd.c include/litemodel_runtime.h include/quantization.h | $(SIMD_BUILD)
 	$(CC) $(CFLAGS_COMMON) -O3 -march=pentium3 -msse -mfpmath=sse \
 		-DLM_SIMD_LEVEL=1 -DLM_SIMD_FUNCTION=lm_matvec_sse -c $< -o $@
 
-$(SIMD_BUILD)/matvec-sse2.o: src/matvec_simd.c include/litemodel_runtime.h | $(SIMD_BUILD)
+$(SIMD_BUILD)/matvec-sse2.o: src/matvec_simd.c include/litemodel_runtime.h include/quantization.h | $(SIMD_BUILD)
 	$(CC) $(CFLAGS_COMMON) -O3 -march=pentium4 -msse2 -mfpmath=sse \
 		-DLM_SIMD_LEVEL=2 -DLM_SIMD_FUNCTION=lm_matvec_sse2 -c $< -o $@
 
@@ -109,17 +122,17 @@ $(GUI_BUILD) $(BUILD)/compat $(SIMD_BUILD):
 $(UEFI_BUILD) $(UEFI_ISO_DIR):
 	mkdir -p $@
 
-$(UEFI_BUILD)/main.o: uefi/main.c src/font8x8.h include/litemodel.h include/litemodel_runtime.h | $(UEFI_BUILD)
+$(UEFI_BUILD)/main.o: uefi/main.c src/font8x8.h include/build_number.h include/cursor_bitmap.h include/litemodel.h include/litemodel_runtime.h | $(UEFI_BUILD)
 	$(CC) $(UEFI_CFLAGS) -c $< -o $@
 
-$(UEFI_BUILD)/%.o: src/%.c include/litemodel.h include/litemodel_runtime.h | $(UEFI_BUILD)
+$(UEFI_BUILD)/%.o: src/%.c include/litemodel.h include/litemodel_runtime.h include/quantization.h | $(UEFI_BUILD)
 	$(CC) $(UEFI_CFLAGS) -c $< -o $@
 
-$(UEFI_BUILD)/matvec-sse.o: src/matvec_simd.c include/litemodel_runtime.h | $(UEFI_BUILD)
+$(UEFI_BUILD)/matvec-sse.o: src/matvec_simd.c include/litemodel_runtime.h include/quantization.h | $(UEFI_BUILD)
 	$(CC) $(UEFI_CFLAGS) -msse -mfpmath=sse -DLM_SIMD_LEVEL=1 \
 		-DLM_SIMD_FUNCTION=lm_matvec_sse -c $< -o $@
 
-$(UEFI_BUILD)/matvec-sse2.o: src/matvec_simd.c include/litemodel_runtime.h | $(UEFI_BUILD)
+$(UEFI_BUILD)/matvec-sse2.o: src/matvec_simd.c include/litemodel_runtime.h include/quantization.h | $(UEFI_BUILD)
 	$(CC) $(UEFI_CFLAGS) -msse2 -mfpmath=sse -DLM_SIMD_LEVEL=2 \
 		-DLM_SIMD_FUNCTION=lm_matvec_sse2 -c $< -o $@
 
@@ -191,77 +204,111 @@ models-extra: $(BUILD)/micro2-q4.bm $(BUILD)/micro2-q8.bm $(BUILD)/micro2-f16.bm
 
 LITEMODELS := $(BUILD)/nano-q2.litemodel $(BUILD)/nano-q4.litemodel $(BUILD)/nano-q8.litemodel \
 	$(BUILD)/nano-chat-q2.litemodel $(BUILD)/nano-chat-q4.litemodel $(BUILD)/nano-chat-q8.litemodel \
-	$(BUILD)/micro2-q4.litemodel $(BUILD)/micro2-q8.litemodel $(BUILD)/micro2-f16.litemodel \
+	$(BUILD)/micro2-q1.litemodel $(BUILD)/micro2-q2.litemodel $(BUILD)/micro2-q3.litemodel \
+	$(BUILD)/micro2-q4.litemodel $(BUILD)/micro2-q5.litemodel $(BUILD)/micro2-q6.litemodel \
+	$(BUILD)/micro2-q7.litemodel $(BUILD)/micro2-q8.litemodel $(BUILD)/micro2-f16.litemodel \
 	$(BUILD)/microv1-f16.litemodel $(BUILD)/microv1-f32.litemodel \
 	$(BUILD)/mini-q2.litemodel $(BUILD)/mini-q4.litemodel
 
 litemodels: $(LITEMODELS)
 
-$(BUILD)/nano-q%.litemodel: $(HF_DIR)/model.safetensors $(HF_DIR)/tokenizer.json $(HF_DIR)/config.json tools/convert_litemodel.py
+LITEMODEL_CONVERTER_DEPS := tools/convert_litemodel.py tools/litemodel_common.py tools/quantization.py
+BM2N_CONVERTER_DEPS := tools/convert.py tools/quantization.py
+
+$(BUILD)/nano-q%.litemodel: $(HF_DIR)/model.safetensors $(HF_DIR)/tokenizer.json $(HF_DIR)/config.json $(LITEMODEL_CONVERTER_DEPS) tools/architectures/banana.py
 	$(PYTHON) tools/convert_litemodel.py --model $(HF_DIR)/model.safetensors \
 		--tokenizer $(HF_DIR)/tokenizer.json --config $(HF_DIR)/config.json \
 		--bits $* --output $@
 
-$(BUILD)/nano-chat-q%.litemodel: $(HF_CHAT_DIR)/model.safetensors $(HF_CHAT_DIR)/tokenizer.json $(HF_CHAT_DIR)/config.json tools/convert_litemodel.py
+$(BUILD)/nano-chat-q%.litemodel: $(HF_CHAT_DIR)/model.safetensors $(HF_CHAT_DIR)/tokenizer.json $(HF_CHAT_DIR)/config.json $(LITEMODEL_CONVERTER_DEPS) tools/architectures/banana.py
 	$(PYTHON) tools/convert_litemodel.py --model $(HF_CHAT_DIR)/model.safetensors \
 		--tokenizer $(HF_CHAT_DIR)/tokenizer.json --config $(HF_CHAT_DIR)/config.json \
 		--bits $* --chat --output $@
 
-$(BUILD)/micro2-q%.litemodel: $(HF_MICRO2_DIR)/model.safetensors $(HF_MICRO2_DIR)/tokenizer.json $(HF_MICRO2_DIR)/config.json tools/convert_litemodel.py
+$(BUILD)/micro2-q%.litemodel: $(HF_MICRO2_DIR)/model.safetensors $(HF_MICRO2_DIR)/tokenizer.json $(HF_MICRO2_DIR)/config.json $(LITEMODEL_CONVERTER_DEPS) tools/architectures/banana.py
 	$(PYTHON) tools/convert_litemodel.py --model $(HF_MICRO2_DIR)/model.safetensors \
 		--tokenizer $(HF_MICRO2_DIR)/tokenizer.json --config $(HF_MICRO2_DIR)/config.json \
 		--bits $* --output $@
 
-$(BUILD)/micro2-f16.litemodel: $(HF_MICRO2_DIR)/model.safetensors $(HF_MICRO2_DIR)/tokenizer.json $(HF_MICRO2_DIR)/config.json tools/convert_litemodel.py
+$(BUILD)/micro2-f16.litemodel: $(HF_MICRO2_DIR)/model.safetensors $(HF_MICRO2_DIR)/tokenizer.json $(HF_MICRO2_DIR)/config.json $(LITEMODEL_CONVERTER_DEPS) tools/architectures/banana.py
 	$(PYTHON) tools/convert_litemodel.py --model $(HF_MICRO2_DIR)/model.safetensors \
 		--tokenizer $(HF_MICRO2_DIR)/tokenizer.json --config $(HF_MICRO2_DIR)/config.json \
 		--bits 16 --output $@
 
-$(BUILD)/microv1-f%.litemodel: $(HF_MICROV1_DIR)/model.safetensors $(HF_MICROV1_DIR)/tokenizer.json $(HF_MICROV1_DIR)/config.json tools/convert_litemodel.py
+$(BUILD)/microv1-f%.litemodel: $(HF_MICROV1_DIR)/model.safetensors $(HF_MICROV1_DIR)/tokenizer.json $(HF_MICROV1_DIR)/config.json $(LITEMODEL_CONVERTER_DEPS) tools/architectures/banana.py
 	$(PYTHON) tools/convert_litemodel.py --model $(HF_MICROV1_DIR)/model.safetensors \
 		--tokenizer $(HF_MICROV1_DIR)/tokenizer.json --config $(HF_MICROV1_DIR)/config.json \
 		--bits $* --output $@
 
-$(BUILD)/mini-q%.litemodel: $(HF_MINI_DIR)/model.safetensors $(HF_MINI_DIR)/tokenizer.json $(HF_MINI_DIR)/config.json tools/convert_litemodel.py
+$(BUILD)/mini-q%.litemodel: $(HF_MINI_DIR)/model.safetensors $(HF_MINI_DIR)/tokenizer.json $(HF_MINI_DIR)/config.json $(LITEMODEL_CONVERTER_DEPS) tools/architectures/banana.py
 	$(PYTHON) tools/convert_litemodel.py --model $(HF_MINI_DIR)/model.safetensors \
 		--tokenizer $(HF_MINI_DIR)/tokenizer.json --config $(HF_MINI_DIR)/config.json \
 		--bits $* --output $@
 
-$(BUILD)/model-q%.bm: $(HF_DIR)/model.safetensors $(HF_DIR)/tokenizer.json $(HF_DIR)/config.json tools/convert.py
+$(BUILD)/model-q%.bm: $(HF_DIR)/model.safetensors $(HF_DIR)/tokenizer.json $(HF_DIR)/config.json $(BM2N_CONVERTER_DEPS)
 	$(PYTHON) tools/convert.py --model $(HF_DIR)/model.safetensors \
 		--tokenizer $(HF_DIR)/tokenizer.json --config $(HF_DIR)/config.json \
 		--bits $* --output $@
 
-$(BUILD)/chat-q%.bm: $(HF_CHAT_DIR)/model.safetensors $(HF_CHAT_DIR)/tokenizer.json $(HF_CHAT_DIR)/config.json tools/convert.py
+$(BUILD)/chat-q%.bm: $(HF_CHAT_DIR)/model.safetensors $(HF_CHAT_DIR)/tokenizer.json $(HF_CHAT_DIR)/config.json $(BM2N_CONVERTER_DEPS)
 	$(PYTHON) tools/convert.py --model $(HF_CHAT_DIR)/model.safetensors \
 		--tokenizer $(HF_CHAT_DIR)/tokenizer.json --config $(HF_CHAT_DIR)/config.json \
 		--bits $* --output $@
 
-$(BUILD)/micro2-q%.bm: $(HF_MICRO2_DIR)/model.safetensors $(HF_MICRO2_DIR)/tokenizer.json $(HF_MICRO2_DIR)/config.json tools/convert.py
+$(BUILD)/micro2-q%.bm: $(HF_MICRO2_DIR)/model.safetensors $(HF_MICRO2_DIR)/tokenizer.json $(HF_MICRO2_DIR)/config.json $(BM2N_CONVERTER_DEPS)
 	$(PYTHON) tools/convert.py --model $(HF_MICRO2_DIR)/model.safetensors \
 		--tokenizer $(HF_MICRO2_DIR)/tokenizer.json --config $(HF_MICRO2_DIR)/config.json \
 		--bits $* --output $@
 
-$(BUILD)/micro2-f16.bm: $(HF_MICRO2_DIR)/model.safetensors $(HF_MICRO2_DIR)/tokenizer.json $(HF_MICRO2_DIR)/config.json tools/convert.py
+$(BUILD)/micro2-f16.bm: $(HF_MICRO2_DIR)/model.safetensors $(HF_MICRO2_DIR)/tokenizer.json $(HF_MICRO2_DIR)/config.json $(BM2N_CONVERTER_DEPS)
 	$(PYTHON) tools/convert.py --model $(HF_MICRO2_DIR)/model.safetensors \
 		--tokenizer $(HF_MICRO2_DIR)/tokenizer.json --config $(HF_MICRO2_DIR)/config.json \
 		--bits 16 --output $@
 
-$(BUILD)/microv1-f%.bm: $(HF_MICROV1_DIR)/model.safetensors $(HF_MICROV1_DIR)/tokenizer.json $(HF_MICROV1_DIR)/config.json tools/convert.py
+$(BUILD)/microv1-f%.bm: $(HF_MICROV1_DIR)/model.safetensors $(HF_MICROV1_DIR)/tokenizer.json $(HF_MICROV1_DIR)/config.json $(BM2N_CONVERTER_DEPS)
 	$(PYTHON) tools/convert.py --model $(HF_MICROV1_DIR)/model.safetensors \
 		--tokenizer $(HF_MICROV1_DIR)/tokenizer.json --config $(HF_MICROV1_DIR)/config.json \
 		--bits $* --output $@
 
-$(BUILD)/mini-q%.bm: $(HF_MINI_DIR)/model.safetensors $(HF_MINI_DIR)/tokenizer.json $(HF_MINI_DIR)/config.json tools/convert.py
+$(BUILD)/mini-q%.bm: $(HF_MINI_DIR)/model.safetensors $(HF_MINI_DIR)/tokenizer.json $(HF_MINI_DIR)/config.json $(BM2N_CONVERTER_DEPS)
 	$(PYTHON) tools/convert.py --model $(HF_MINI_DIR)/model.safetensors \
 		--tokenizer $(HF_MINI_DIR)/tokenizer.json --config $(HF_MINI_DIR)/config.json \
 		--bits $* --output $@
 
 iso: $(BUILD)/bananamind-os.iso
 
+HQ_ASSETS := $(HQ_ASSET_DIR)/BACK.QOI $(HQ_ASSET_DIR)/BANANA.QOI \
+	$(HQ_ASSET_DIR)/CPU.QOI $(HQ_ASSET_DIR)/CUBE.QOI $(HQ_ASSET_DIR)/MOUSE.QOI \
+	$(HQ_ASSET_DIR)/SEND.QOI
+
+hq-assets: $(HQ_ASSETS)
+
+$(HQ_ASSETS): tools/prepare_hq_assets.sh assets/hq/source/background.jpg \
+	assets/hq/source/banana.webp assets/hq/source/cpu.svg \
+	assets/hq/source/cube.png assets/hq/source/mouse.png assets/hq/source/send.svg
+	tools/prepare_hq_assets.sh $(HQ_ASSET_DIR)
+
 uefi-iso: $(BUILD)/bananamind-os-uefi.iso
 
 ultra: $(BUILD)/bananamind-ultra.iso
+
+dosboxx: kernel $(BUILD)/micro2-q4.litemodel $(HQ_ASSETS) \
+		boot/dosboxx.cfg models/default.cfg tools/build_dosboxx.py
+	$(PYTHON) tools/build_dosboxx.py \
+		--boot-output $(DOSBOXX_BOOT) --models-output $(DOSBOXX_MODELS) \
+		--kernel $(BUILD)/kernel.elf --compat-kernel $(BUILD)/kernel-486.elf \
+		--config boot/dosboxx.cfg --model $(BUILD)/micro2-q4.litemodel \
+		--catalog models/default.cfg --assets $(HQ_ASSET_DIR)
+
+dosboxx-nano-chat: kernel $(BUILD)/nano-chat-q4.litemodel $(HQ_ASSETS) \
+		boot/dosboxx.cfg models/default.cfg tools/build_dosboxx.py
+	$(PYTHON) tools/build_dosboxx.py \
+		--boot-output $(DOSBOXX_BOOT) --models-output $(DOSBOXX_NANO_CHAT_MODELS) \
+		--kernel $(BUILD)/kernel.elf --compat-kernel $(BUILD)/kernel-486.elf \
+		--config boot/dosboxx.cfg --model $(BUILD)/nano-chat-q4.litemodel \
+		--catalog models/default.cfg --assets $(HQ_ASSET_DIR) \
+		--catalog-id nano-chat --variant Q4 --model-filename NNC4.LITEMODEL \
+		--volume-label BMOS_NCHAT_Q4
 
 preset-isos: preset-10 preset-25 preset-100 preset-250
 
@@ -297,8 +344,8 @@ $(BUILD)/bananamind-ultra.iso: $(BUILD)/ultra-boot.img
 	xorriso -as mkisofs -R -J -V BANANAMIND_ULTRA -b boot/ultra-boot.img \
 		-no-emul-boot -boot-load-size 8 -boot-info-table -o $@ $(ULTRA_ISO_DIR)
 
-$(BUILD)/bananamind-os.iso: kernel litemodels grub/grub.cfg models/default.cfg
-	mkdir -p $(LITE_ISO_DIR)/boot/grub $(LITE_ISO_DIR)/boot/models
+$(BUILD)/bananamind-os.iso: kernel litemodels $(HQ_ASSETS) grub/grub.cfg models/default.cfg
+	mkdir -p $(LITE_ISO_DIR)/boot/grub $(LITE_ISO_DIR)/boot/models $(LITE_ISO_DIR)/boot/assets
 	cp $(BUILD)/kernel.elf $(LITE_ISO_DIR)/boot/kernel.elf
 	cp $(BUILD)/kernel-486.elf $(LITE_ISO_DIR)/boot/kernel-486.elf
 	cp $(BUILD)/nano-q2.litemodel $(LITE_ISO_DIR)/boot/models/NNB2.LITEMODEL
@@ -307,7 +354,13 @@ $(BUILD)/bananamind-os.iso: kernel litemodels grub/grub.cfg models/default.cfg
 	cp $(BUILD)/nano-chat-q2.litemodel $(LITE_ISO_DIR)/boot/models/NNC2.LITEMODEL
 	cp $(BUILD)/nano-chat-q4.litemodel $(LITE_ISO_DIR)/boot/models/NNC4.LITEMODEL
 	cp $(BUILD)/nano-chat-q8.litemodel $(LITE_ISO_DIR)/boot/models/NNC8.LITEMODEL
+	cp $(BUILD)/micro2-q1.litemodel $(LITE_ISO_DIR)/boot/models/MIC1.LITEMODEL
+	cp $(BUILD)/micro2-q2.litemodel $(LITE_ISO_DIR)/boot/models/MIC2.LITEMODEL
+	cp $(BUILD)/micro2-q3.litemodel $(LITE_ISO_DIR)/boot/models/MIC3.LITEMODEL
 	cp $(BUILD)/micro2-q4.litemodel $(LITE_ISO_DIR)/boot/models/MIC4.LITEMODEL
+	cp $(BUILD)/micro2-q5.litemodel $(LITE_ISO_DIR)/boot/models/MIC5.LITEMODEL
+	cp $(BUILD)/micro2-q6.litemodel $(LITE_ISO_DIR)/boot/models/MIC6.LITEMODEL
+	cp $(BUILD)/micro2-q7.litemodel $(LITE_ISO_DIR)/boot/models/MIC7.LITEMODEL
 	cp $(BUILD)/micro2-q8.litemodel $(LITE_ISO_DIR)/boot/models/MIC8.LITEMODEL
 	cp $(BUILD)/micro2-f16.litemodel $(LITE_ISO_DIR)/boot/models/MIC16.LITEMODEL
 	cp $(BUILD)/microv1-f16.litemodel $(LITE_ISO_DIR)/boot/models/MBV16.LITEMODEL
@@ -315,6 +368,7 @@ $(BUILD)/bananamind-os.iso: kernel litemodels grub/grub.cfg models/default.cfg
 	cp $(BUILD)/mini-q2.litemodel $(LITE_ISO_DIR)/boot/models/MIN2.LITEMODEL
 	cp $(BUILD)/mini-q4.litemodel $(LITE_ISO_DIR)/boot/models/MIN4.LITEMODEL
 	cp models/default.cfg $(LITE_ISO_DIR)/boot/models/CATALOG.CFG
+	cp $(HQ_ASSETS) $(LITE_ISO_DIR)/boot/assets/
 	cp grub/grub.cfg $(LITE_ISO_DIR)/boot/grub/grub.cfg
 	grub-mkrescue -iso-level 3 -o $@ $(LITE_ISO_DIR)
 
@@ -326,7 +380,13 @@ $(BUILD)/bananamind-os-uefi.iso: uefi-app litemodels models/default.cfg tools/pa
 	cp $(BUILD)/nano-chat-q2.litemodel $(UEFI_ISO_DIR)/models/NNC2.LITEMODEL
 	cp $(BUILD)/nano-chat-q4.litemodel $(UEFI_ISO_DIR)/models/NNC4.LITEMODEL
 	cp $(BUILD)/nano-chat-q8.litemodel $(UEFI_ISO_DIR)/models/NNC8.LITEMODEL
+	cp $(BUILD)/micro2-q1.litemodel $(UEFI_ISO_DIR)/models/MIC1.LITEMODEL
+	cp $(BUILD)/micro2-q2.litemodel $(UEFI_ISO_DIR)/models/MIC2.LITEMODEL
+	cp $(BUILD)/micro2-q3.litemodel $(UEFI_ISO_DIR)/models/MIC3.LITEMODEL
 	cp $(BUILD)/micro2-q4.litemodel $(UEFI_ISO_DIR)/models/MIC4.LITEMODEL
+	cp $(BUILD)/micro2-q5.litemodel $(UEFI_ISO_DIR)/models/MIC5.LITEMODEL
+	cp $(BUILD)/micro2-q6.litemodel $(UEFI_ISO_DIR)/models/MIC6.LITEMODEL
+	cp $(BUILD)/micro2-q7.litemodel $(UEFI_ISO_DIR)/models/MIC7.LITEMODEL
 	cp $(BUILD)/micro2-q8.litemodel $(UEFI_ISO_DIR)/models/MIC8.LITEMODEL
 	cp $(BUILD)/micro2-f16.litemodel $(UEFI_ISO_DIR)/models/MIC16.LITEMODEL
 	cp $(BUILD)/microv1-f16.litemodel $(UEFI_ISO_DIR)/models/MBV16.LITEMODEL
@@ -346,6 +406,9 @@ run-uefi: $(BUILD)/bananamind-os-uefi.iso
 		-drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd \
 		-drive if=pflash,format=raw,file=/tmp/bananamind-os-ovmf-vars.fd \
 		-device qemu-xhci -device usb-tablet -cdrom $< -boot d
+
+run-dosboxx: dosboxx
+	dosbox-x -conf dosbox-x.conf
 
 run-2: $(BUILD)/bananamind-os.iso
 	qemu-system-i386 -cpu 486 -m 6 -cdrom $< -boot d -serial stdio

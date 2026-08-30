@@ -4,7 +4,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "build_number.h"
 #include "font8x8.h"
+#include "cursor_bitmap.h"
 #include "litemodel.h"
 #include "litemodel_runtime.h"
 #include "mouse.h"
@@ -13,8 +15,8 @@
 #define CATALOG_BYTES 16384u
 #define INPUT_BYTES 512u
 #define CHAT_HISTORY_BYTES 4096u
-#define CURSOR_W 12u
-#define CURSOR_H 18u
+#define CURSOR_W GUI_CURSOR_WIDTH
+#define CURSOR_H GUI_CURSOR_HEIGHT
 #define MAX_POINTER_PROTOCOLS 8u
 
 #define UI_DARK     0x111318u
@@ -219,9 +221,9 @@ static void cursor_draw(void) {
             if (px >= screen_width || py >= screen_height) continue;
             uint32_t *pixel = framebuffer + py * screen_stride + px;
             cursor_under[y * CURSOR_W + x] = *pixel;
-            if (x == 0u || y == x * 2u || (x == 1u && y > 1u) ||
-                (y == 16u && x < 7u)) *pixel = dark;
-            else if (x < 7u && y > x * 2u && y < 16u) *pixel = white;
+            uint8_t cursor_pixel = gui_cursor_bitmap[y * CURSOR_W + x];
+            if (cursor_pixel == GUI_CURSOR_OUTLINE) *pixel = dark;
+            else if (cursor_pixel == GUI_CURSOR_FILL) *pixel = white;
         }
     cursor_saved = 1u;
 }
@@ -562,6 +564,9 @@ static void draw_picker(uint32_t selected, uint32_t first, uint32_t memory_mb) {
         draw_card(first + row, selected, first);
     draw_details(selected, memory_mb);
     draw_text(20u, screen_height - 22u, "Mouse or arrows + Enter", UI_MUTED, UI_DARK);
+    char build_label[20] = "BUILD ";
+    number_text(BANANAMIND_BUILD_NUMBER, build_label + 6u);
+    draw_text(screen_width - 94u, screen_height - 22u, build_label, UI_MUTED, UI_DARK);
     cursor_draw();
 }
 
@@ -928,12 +933,47 @@ static int read_prompt(uint8_t *input, uint32_t *length) {
     }
 }
 
+static uint32_t active_chat_style(void) {
+    return (runtime.header->flags & LITEMODEL_FLAG_CHAT_STYLE_MASK) >>
+        LITEMODEL_FLAG_CHAT_STYLE_SHIFT;
+}
+
+static const char *chat_user_prefix(uint32_t style, uint8_t first_turn) {
+    if (style == LITEMODEL_CHAT_LFM2 && first_turn)
+        return "<|im_start|>system\nYou are a helpful assistant trained by Liquid AI.<|im_end|>\n<|im_start|>user\n";
+    if (style == LITEMODEL_CHAT_SMOLLM && first_turn)
+        return "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\n";
+    if (style == LITEMODEL_CHAT_CHATML || style == LITEMODEL_CHAT_SMOLLM ||
+        style == LITEMODEL_CHAT_LFM2 ||
+        style == LITEMODEL_CHAT_QWEN35)
+        return "<|im_start|>user\n";
+    return "<|user|>\n";
+}
+
+static const char *chat_generation_suffix(uint32_t style) {
+    if (style == LITEMODEL_CHAT_QWEN35)
+        return "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+    if (style == LITEMODEL_CHAT_CHATML || style == LITEMODEL_CHAT_SMOLLM ||
+        style == LITEMODEL_CHAT_LFM2)
+        return "<|im_end|>\n<|im_start|>assistant\n";
+    return "\n<|assistant|>\n";
+}
+
+static const char *chat_assistant_end(void) {
+    uint32_t style = active_chat_style();
+    if (style == LITEMODEL_CHAT_CHATML || style == LITEMODEL_CHAT_SMOLLM ||
+        style == LITEMODEL_CHAT_LFM2 ||
+        style == LITEMODEL_CHAT_QWEN35)
+        return "<|im_end|>\n";
+    return "\n";
+}
+
 static uint32_t chat_wrap(const uint8_t *input, uint32_t length, uint8_t output[INPUT_BYTES]) {
-    static const char prefix[] = "<|user|>\n";
-    static const char suffix[] = "\n<|assistant|>\n";
+    const char *prefix = chat_user_prefix(active_chat_style(), 1u);
+    const char *suffix = chat_generation_suffix(active_chat_style());
     uint32_t written = 0u;
     for (uint32_t index = 0u; prefix[index]; ++index) output[written++] = (uint8_t)prefix[index];
-    uint32_t suffix_length = sizeof(suffix) - 1u;
+    uint32_t suffix_length = text_length(suffix);
     if (length > INPUT_BYTES - written - suffix_length) length = INPUT_BYTES - written - suffix_length;
     for (uint32_t index = 0u; index < length; ++index) output[written++] = input[index];
     for (uint32_t index = 0u; suffix[index]; ++index) output[written++] = (uint8_t)suffix[index];
@@ -972,9 +1012,9 @@ static const uint8_t *prepare_model_input(const uint8_t *input, uint32_t length,
         *model_length = chat_wrap(input, length, wrapped);
         return wrapped;
     }
-    history_append_text("<|user|>\n");
+    history_append_text(chat_user_prefix(active_chat_style(), chat_history_length == 0u));
     history_append(input, length);
-    history_append_text("\n<|assistant|>\n");
+    history_append_text(chat_generation_suffix(active_chat_style()));
     *model_length = chat_history_length;
     return chat_history;
 }
@@ -986,18 +1026,19 @@ static uint32_t next_random(void) {
     return random_state;
 }
 
-static void store_token(uint16_t id) {
+static void store_token(uint32_t id) {
     if (!active_chat || !multi_turn_enabled || id == runtime.header->bos_id ||
         id == runtime.header->eos_id || id == runtime.header->pad_id) return;
     const struct litemodel_token *token = litemodel_token(&runtime, id);
-    if (token) history_append(runtime.token_data + token->offset, token->length);
+    if (token && !(token->flags & LITEMODEL_TOKEN_SPECIAL))
+        history_append(runtime.token_data + token->offset, token->length);
 }
 
-static void print_token(uint16_t id) {
+static void print_token(uint32_t id) {
     if (id == runtime.header->bos_id || id == runtime.header->eos_id ||
         id == runtime.header->pad_id) return;
     const struct litemodel_token *token = litemodel_token(&runtime, id);
-    if (!token) return;
+    if (!token || (token->flags & LITEMODEL_TOKEN_SPECIAL)) return;
     for (uint32_t index = 0u; index < token->length; ++index)
         output_char((char)runtime.token_data[token->offset + index]);
 }
@@ -1010,7 +1051,7 @@ static void generate(const uint8_t *input, uint32_t length) {
     if (reserved >= context_tokens) reserved = context_tokens - 1u;
     uint32_t prompt_capacity = context_tokens - reserved;
     litemodel_reset(&runtime);
-    uint16_t *tokens = runtime.prompt_tokens;
+    uint32_t *tokens = runtime.prompt_tokens;
     uint32_t count = litemodel_tokenize(&runtime, model_input, model_length,
                                         tokens, prompt_capacity);
     begin_output();
@@ -1020,7 +1061,7 @@ static void generate(const uint8_t *input, uint32_t length) {
     else for (uint32_t position = 0u; position < count; ++position)
         litemodel_forward(&runtime, tokens[position], position);
     random_state ^= length + count + (uint32_t)pointer_x + ((uint32_t)pointer_y << 16);
-    uint16_t next = litemodel_sample(&runtime, temperature_tenths, next_random());
+    uint32_t next = litemodel_sample(&runtime, temperature_tenths, next_random());
     begin_output();
     uint32_t generation_limit = max_generation_tokens;
     if (generation_limit > context_tokens - count)
@@ -1028,7 +1069,7 @@ static void generate(const uint8_t *input, uint32_t length) {
     for (uint32_t generated = 0u; generated < generation_limit; ++generated) {
         print_token(next);
         store_token(next);
-        if (next == runtime.header->eos_id) break;
+        if (litemodel_is_stop(&runtime, next)) break;
         uint32_t sequence_count = count + generated + 1u;
         tokens[sequence_count - 1u] = next;
         if (sequence || !kv_cache_enabled) {
@@ -1044,7 +1085,7 @@ static void generate(const uint8_t *input, uint32_t length) {
         }
         next = litemodel_sample(&runtime, temperature_tenths, next_random());
     }
-    if (active_chat && multi_turn_enabled) history_append_text("\n");
+    if (active_chat && multi_turn_enabled) history_append_text(chat_assistant_end());
 }
 
 static void show_error(const char *title, const char *detail) {
@@ -1067,6 +1108,9 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *table) {
     InitializeLib(image, table);
     image_handle = image; system_table = table; boot_services = table->BootServices;
     serial_text("BananaMind UEFI: entered native frontend\n");
+    serial_text("BananaMind UEFI: build ");
+    serial_u64(BANANAMIND_BUILD_NUMBER);
+    serial_text("\n");
     if (!locate_model_volume()) return fail_text(L"The model catalog was not found on the EFI image.");
     serial_text("BananaMind UEFI: catalog read; zero model weights loaded\n");
     if (!parse_catalog()) return fail_text(L"The model catalog is invalid or empty.");
