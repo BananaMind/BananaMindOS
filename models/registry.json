@@ -5,91 +5,122 @@
       "id": "nano-base", "repo": "BananaMind/BananaMind-2-Nano",
       "revision": "c8564d1bd3f6177221ed7e4f63ae5f281a677a1c", "architecture": "banana",
       "name": "BananaMind 2 Nano", "chat": false, "legacy": true,
-      "description": "Compact BananaMind base model", "quants": {"2": 6, "4": 8, "8": 14}
+      "description": "Compact BananaMind base model", "quants": {"1": 5, "2": 6, "3": 7, "4": 8, "5": 10, "6": 11, "7": 13, "8": 14}
     },
     {
       "id": "nano-chat", "repo": "BananaMind/BananaMind-2-Nano-Chat",
       "revision": "6def7ab4d1bd8449d9b75b62bfb174f73d3a8ad6", "architecture": "banana",
       "name": "BananaMind 2 Nano Chat", "chat": true, "legacy": true,
-      "description": "Fast compact assistant", "quants": {"2": 6, "4": 8, "8": 14}
+      "description": "Fast compact assistant", "quants": {"1": 5, "2": 6, "3": 7, "4": 8, "5": 10, "6": 11, "7": 13, "8": 14}
     },
     {
       "id": "micro2", "repo": "BananaMind/BananaMind-2-Micro",
       "revision": "dbc892b2df93f45d120b07c64673f00e3abb1593", "architecture": "banana",
       "name": "BananaMind 2 Micro", "chat": false, "legacy": true,
-      "description": "Tiny XSA refresh model", "quants": {"4": 4, "8": 5, "16": 8}
+      "description": "Tiny XSA refresh model", "quants": {"1": 4, "2": 4, "3": 4, "4": 4, "5": 5, "6": 5, "7": 5, "8": 5, "16": 8}
     },
     {
       "id": "micro-v1", "repo": "BananaMind/MicroBananaMind-v1",
       "revision": "2dd299a219ffabc05bfcd39862e9293c68d3ef92", "architecture": "banana",
       "name": "MicroBananaMind v1", "chat": false, "legacy": true,
-      "description": "Smallest classic BananaMind", "quants": {"16": 4, "32": 6}
+      "description": "Smallest classic BananaMind", "quants": {"1": 4, "2": 4, "3": 4, "4": 4, "5": 4, "6": 4, "7": 4, "8": 4, "16": 4, "32": 6}
     },
     {
       "id": "mini", "repo": "BananaMind/BananaMind-2-Mini",
       "revision": "6400d0a6dcbe52f3c725291cb97c079c591c05a4", "architecture": "banana",
       "name": "BananaMind 2 Mini", "chat": false, "legacy": true,
-      "description": "25M parameter base model", "quants": {"2": 12, "4": 20, "8": 34}
+      "description": "25M parameter base model", "quants": {"1": 9, "2": 12, "3": 16, "4": 20, "5": 24, "6": 28, "7": 31, "8": 34}
     },
     {
       "id": "mini-chat", "repo": "BananaMind/BananaMind-2-Mini-Chat",
       "revision": "121fb22f6307f6b8be1976719357661be009628d", "architecture": "banana",
       "name": "BananaMind 2 Mini Chat", "chat": true, "legacy": false,
-      "description": "Balanced 25M parameter assistant", "quants": {"2": 12, "4": 20, "8": 34}
+      "description": "Balanced 25M parameter assistant", "quants": {"1": 9, "2": 12, "3": 16, "4": 20, "5": 24, "6": 28, "7": 31, "8": 34}
     },
     {
       "id": "medium", "repo": "BananaMind/BananaMind-2-Medium",
       "revision": "7d2f397ef1cae15cf84cd6d9b428373238aa3231", "architecture": "banana",
       "name": "BananaMind 2 Medium", "chat": false, "legacy": false,
-      "description": "50M parameter BananaMind base", "quants": {"2": 25, "4": 40, "8": 70}
+      "description": "50M parameter BananaMind base", "quants": {"1": 18, "2": 25, "3": 33, "4": 40, "5": 48, "6": 55, "7": 63, "8": 70}
     },
     {
       "id": "medium-chat", "repo": "BananaMind/BananaMind-2-Medium-Chat",
       "revision": "86bfcd9075e54a7da8aa101d9ba2ca819fa59143", "architecture": "banana",
       "name": "BananaMind 2 Medium Chat", "chat": true, "legacy": false,
-      "description": "Stronger 50M parameter assistant", "quants": {"2": 25, "4": 40, "8": 70}
+      "description": "Stronger 50M parameter assistant", "quants": {"1": 18, "2": 25, "3": 33, "4": 40, "5": 48, "6": 55, "7": 63, "8": 70}
     },
     {
       "id": "pro", "repo": "BananaMind/BananaMind-2-Pro",
       "revision": "c215af4f2cc46d01cba6c5be3c132f4c0e9a9871", "architecture": "banana",
       "name": "BananaMind 2 Pro", "chat": false, "legacy": false,
-      "description": "139M parameter BananaMind base", "quants": {"2": 64, "4": 100, "8": 190}
+      "description": "139M parameter BananaMind base", "quants": {"1": 45, "2": 64, "3": 82, "4": 100, "5": 123, "6": 145, "7": 168, "8": 190}
     },
     {
       "id": "pro-chat", "repo": "BananaMind/BananaMind-2-Pro-Preview-Chat",
       "revision": "04011eeb6054fa30145019eebc2af3425856979c", "architecture": "banana",
       "name": "BananaMind 2 Pro Preview Chat", "chat": true, "legacy": false,
-      "description": "Largest BananaMind assistant", "quants": {"2": 64, "4": 100, "8": 190}
+      "description": "Largest BananaMind assistant", "quants": {"1": 45, "2": 64, "3": 82, "4": 100, "5": 123, "6": 145, "7": 168, "8": 190}
     },
     {
       "id": "smollm", "repo": "HuggingFaceTB/SmolLM-135M",
       "revision": "1d461723eec654e65efdc40cf49301c89c0c92f4", "architecture": "llama",
       "name": "SmolLM 135M", "chat": false, "legacy": false,
-      "description": "Original 135M SmolLM base", "quants": {"2": 64, "4": 100, "8": 190}
+      "description": "Original 135M SmolLM base", "quants": {"1": 45, "2": 64, "3": 82, "4": 100, "5": 123, "6": 145, "7": 168, "8": 190}
     },
     {
       "id": "smollm2", "repo": "HuggingFaceTB/SmolLM2-135M",
       "revision": "93efa2f097d58c2a74874c7e644dbc9b0cee75a2", "architecture": "llama",
       "name": "SmolLM2 135M", "chat": false, "legacy": false,
-      "description": "Strong 135M Llama-family base", "quants": {"2": 64, "4": 100, "8": 190}
+      "description": "Strong 135M Llama-family base", "quants": {"1": 45, "2": 64, "3": 82, "4": 100, "5": 123, "6": 145, "7": 168, "8": 190}
+    },
+    {
+      "id": "lfm25-230m", "repo": "LiquidAI/LFM2.5-230M",
+      "revision": "40cb2ad3b3044d5a41eee083a6103c8b523afa45", "architecture": "lfm2",
+      "name": "LFM2.5 230M", "chat": true, "chat_style": "lfm2", "legacy": false,
+      "description": "LiquidAI instruction model with hybrid convolution and attention", "quants": {"1": 70, "2": 96, "3": 125, "4": 155, "5": 185, "6": 215, "7": 245, "8": 275}
+    },
+    {
+      "id": "lfm25-350m", "repo": "LiquidAI/LFM2.5-350M",
+      "revision": "9e6c6ccf47cd318696e137d381a7ded8fe4df09f", "architecture": "lfm2",
+      "name": "LFM2.5 350M", "chat": true, "chat_style": "lfm2", "legacy": false,
+      "description": "Larger LiquidAI hybrid instruction model", "quants": {"1": 105, "2": 145, "3": 190, "4": 235, "5": 280, "6": 325, "7": 370, "8": 415}
+    },
+    {
+      "id": "gemma3-270m", "repo": "google/gemma-3-270m",
+      "revision": "9b0cfec892e2bc2afd938c98eabe4e4a7b1e0ca1", "architecture": "gemma3",
+      "name": "Gemma 3 270M", "chat": false, "legacy": false, "gated": true,
+      "description": "Google Gemma 3 compact base model", "quants": {"1": 105, "2": 145, "3": 185, "4": 225, "5": 265, "6": 305, "7": 345, "8": 385}
+    },
+    {
+      "id": "smollm2-360m-instruct", "repo": "HuggingFaceTB/SmolLM2-360M-Instruct",
+      "revision": "a10cc1512eabd3dde888204e902eca88bddb4951", "architecture": "llama",
+      "name": "SmolLM2 360M Instruct", "chat": true, "chat_style": "smollm", "legacy": false,
+      "description": "Hugging Face compact instruction model", "quants": {"1": 110, "2": 150, "3": 195, "4": 240, "5": 285, "6": 330, "7": 375, "8": 420}
+    },
+    {
+      "id": "qwen35-08b", "repo": "Qwen/Qwen3.5-0.8B",
+      "revision": "2fc06364715b967f1860aea9cf38778875588b17", "architecture": "qwen35",
+      "model_file": "model.safetensors-00001-of-00001.safetensors",
+      "name": "Qwen3.5 0.8B", "chat": true, "chat_style": "qwen35", "legacy": false,
+      "description": "Qwen3.5 language stack; vision and speculative tensors omitted", "quants": {"1": 240, "2": 340, "3": 440, "4": 540, "5": 640, "6": 740, "7": 840, "8": 940}
     },
     {
       "id": "gptx25", "repo": "AxiomicLabs/GPT-X2.5-135M",
       "revision": "4b49a8d6986f11989df15de37b44be7d04e634e7", "architecture": "gptx",
       "name": "GPT-X2.5 135M", "chat": false, "legacy": false,
-      "description": "XSA-enhanced 135M base model", "quants": {"2": 64, "4": 100, "8": 190}
+      "description": "XSA-enhanced 135M base model", "quants": {"1": 45, "2": 64, "3": 82, "4": 100, "5": 123, "6": 145, "7": 168, "8": 190}
     },
     {
       "id": "min-spark", "repo": "MinimaLabs/min-spark-1.1",
       "revision": "b47322abe7fda086e1b675e7fc4fafd55e717b23", "architecture": "minspark",
       "name": "min-spark 1.1", "chat": false, "legacy": false,
-      "description": "5.76M looped Meiosis model", "quants": {"4": 10, "8": 15, "16": 25}
+      "description": "5.76M looped Meiosis model", "quants": {"1": 7, "2": 8, "3": 9, "4": 10, "5": 11, "6": 13, "7": 14, "8": 15, "16": 25}
     },
     {
       "id": "rose-mini", "repo": "GODELEV/Rose-Mini",
       "revision": "780e73ff85d8207e2fc7f5f98e060fd4715b8bd5", "architecture": "rose",
       "name": "Rose-Mini", "chat": false, "legacy": false,
-      "description": "Rose X1 with selected refresh gates", "quants": {"2": 25, "4": 40, "8": 75}
+      "description": "Rose X1 with selected refresh gates", "quants": {"1": 18, "2": 25, "3": 33, "4": 40, "5": 49, "6": 58, "7": 66, "8": 75}
     }
   ],
   "presets": {

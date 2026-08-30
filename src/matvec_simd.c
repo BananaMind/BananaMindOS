@@ -5,22 +5,11 @@
 #endif
 
 #include "litemodel_runtime.h"
+#include "quantization.h"
 
 #ifndef LM_SIMD_FUNCTION
 #error LM_SIMD_FUNCTION must name this backend
 #endif
-
-static int8_t simd_signed_nibble(uint8_t value) {
-    value &= 15u;
-    return value & 8u ? (int8_t)(value | 0xF0u) : (int8_t)value;
-}
-
-static int simd_weight_at(const uint8_t *packed, uint32_t index, uint32_t bits) {
-    if (bits == 8u) return (int8_t)packed[index];
-    if (bits == 4u)
-        return simd_signed_nibble(packed[index >> 1] >> ((index & 1u) * 4u));
-    return (int)((packed[index >> 2] >> ((index & 3u) * 2u)) & 3u) - 1;
-}
 
 static float simd_half_to_float(uint16_t half) {
     uint32_t sign = (uint32_t)(half & 0x8000u) << 16;
@@ -103,10 +92,10 @@ void LM_SIMD_FUNCTION(const struct lm_matrix *matrix,
             __m128 scale_vector = _mm_set1_ps(scale);
             for (; column + 4u <= matrix->cols; column += 4u) {
                 __m128 weight = _mm_set_ps(
-                    (float)simd_weight_at(packed, column + 3u, matrix->bits),
-                    (float)simd_weight_at(packed, column + 2u, matrix->bits),
-                    (float)simd_weight_at(packed, column + 1u, matrix->bits),
-                    (float)simd_weight_at(packed, column, matrix->bits)
+                    (float)lm_quantized_weight(packed, column + 3u, matrix->bits),
+                    (float)lm_quantized_weight(packed, column + 2u, matrix->bits),
+                    (float)lm_quantized_weight(packed, column + 1u, matrix->bits),
+                    (float)lm_quantized_weight(packed, column, matrix->bits)
                 );
                 weight = _mm_mul_ps(weight, scale_vector);
                 accumulated = _mm_add_ps(
@@ -126,7 +115,7 @@ void LM_SIMD_FUNCTION(const struct lm_matrix *matrix,
             float scale = *(const float *)record;
             const uint8_t *packed = record + 4u;
             for (; column < matrix->cols; ++column)
-                sum += (float)simd_weight_at(packed, column, matrix->bits) * scale * input[column];
+                sum += (float)lm_quantized_weight(packed, column, matrix->bits) * scale * input[column];
         }
         output[row] = sum;
     }

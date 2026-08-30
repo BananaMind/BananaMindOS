@@ -13,20 +13,46 @@ import tempfile
 import zlib
 from pathlib import Path
 
+from tools.quantization import (
+    SUPPORTED_BITS, pack_quantized, quantization_divisor, quantize_value,
+)
+
 MAGIC = b"LITEMDL\x1a"
-VERSION = 1
+VERSION = 2
 HEADER = struct.Struct("<8s14I2f14I")
 TOKEN = struct.Struct("<IHH")
-MERGE = struct.Struct("<HHHH")
+MERGE = struct.Struct("<IIII")
+TOKEN_SPECIAL = 1 << 0
 
 ARCH_BANANA = 1
 ARCH_LLAMA = 2
 ARCH_GPTX2 = 3
 ARCH_ROSE_X1 = 4
 ARCH_MINSPARK = 5
+ARCH_LFM2 = 6
+ARCH_GEMMA3 = 7
+ARCH_QWEN35 = 8
 
 FLAG_CHAT = 1 << 0
 FLAG_TIED_EMBEDDING = 1 << 1
+FLAG_SPACE_TO_MARKER = 1 << 2
+FLAG_NO_BOS = 1 << 3
+FLAG_CHAT_STYLE_SHIFT = 8
+
+CHAT_STYLES = {
+    "banana": 0,
+    "chatml": 1,
+    "smollm": 2,
+    "qwen35": 3,
+    "lfm2": 4,
+}
+
+
+def chat_style_flag(name: str) -> int:
+    try:
+        return CHAT_STYLES[name] << FLAG_CHAT_STYLE_SHIFT
+    except KeyError as error:
+        raise ValueError(f"unsupported chat style {name!r}") from error
 
 
 class SafeTensorFile:
@@ -91,17 +117,6 @@ def write_vector(out, sf: SafeTensorFile, name: str, size: int):
     out.write(values.tobytes())
 
 
-def quantize_value(value: float, scale: float, bits: int) -> int:
-    if scale == 0.0:
-        return 0
-    if bits == 8:
-        return max(-127, min(127, round(value / scale)))
-    if bits == 4:
-        return max(-7, min(7, round(value / scale)))
-    ratio = value / scale
-    return -1 if ratio < -0.5 else (1 if ratio > 0.5 else 0)
-
-
 def write_matrix(out, sf: SafeTensorFile, name: str, rows: int, cols: int, bits: int):
     shape, values = sf.tensor(name)
     count = 1
@@ -123,22 +138,12 @@ def write_matrix(out, sf: SafeTensorFile, name: str, rows: int, cols: int, bits:
         start = row * cols
         row_values = values[start : start + cols]
         maximum = max((abs(value) for value in row_values), default=0.0)
-        divisor = 127.0 if bits == 8 else (7.0 if bits == 4 else 1.0)
-        scale = maximum / divisor if maximum else 1.0
+        divisor = float(quantization_divisor(bits))
+        scale = maximum / divisor if maximum else 0.0
         out.write(struct.pack("<f", scale))
-        packed = bytearray(packed_size)
-        if bits == 8:
-            for index, value in enumerate(row_values):
-                packed[index] = quantize_value(value, scale, bits) & 0xFF
-        elif bits == 4:
-            for index, value in enumerate(row_values):
-                packed[index >> 1] |= (
-                    (quantize_value(value, scale, bits) & 0xF) << ((index & 1) * 4)
-                )
-        else:
-            for index, value in enumerate(row_values):
-                code = quantize_value(value, scale, bits) + 1
-                packed[index >> 2] |= code << ((index & 3) * 2)
+        packed = pack_quantized(row_values, scale, bits)
+        if len(packed) != packed_size:
+            raise AssertionError("packed quantized row has the wrong size")
         out.write(packed)
 
 
@@ -157,6 +162,11 @@ def gpt2_byte_decoder() -> dict[str, int]:
 
 
 def _token_bytes(text: str, decoder: dict[str, int]) -> bytes:
+    if len(text) == 6 and text.startswith("<0x") and text.endswith(">"):
+        try:
+            return bytes((int(text[3:5], 16),))
+        except ValueError:
+            pass
     try:
         return bytes(decoder[character] for character in text)
     except KeyError:
@@ -172,16 +182,27 @@ def load_token_bytes(path: Path, vocab_size: int, special_ids: set[int]) -> list
     decoder = gpt2_byte_decoder()
     for text, token_id in vocab.items():
         if 0 <= token_id < vocab_size:
-            tokens[token_id] = b"" if token_id in special_ids else _token_bytes(text, decoder)
+            tokens[token_id] = _token_bytes(text, decoder)
     for added in tokenizer.get("added_tokens", []):
         token_id = added.get("id")
         if isinstance(token_id, int) and 0 <= token_id < vocab_size:
             text = str(added.get("content", ""))
-            tokens[token_id] = b"" if token_id in special_ids else text.encode("utf-8")
-    missing = [index for index, token in enumerate(tokens) if token is None]
-    if missing:
-        raise ValueError(f"tokenizer is missing IDs: {missing[:8]}")
+            tokens[token_id] = text.encode("utf-8")
+    # Some checkpoints reserve embedding rows that deliberately have no
+    # tokenizer piece (LFM2.5 leaves part of its 65,536-row vocabulary inert).
+    # Keep those IDs non-encodable and non-printing instead of rejecting an
+    # otherwise valid checkpoint.
     return [token or b"" for token in tokens]
+
+
+def load_special_token_ids(path: Path, special_ids: set[int]) -> set[int]:
+    tokenizer = json.loads(path.read_text(encoding="utf-8"))
+    result = set(special_ids)
+    for added in tokenizer.get("added_tokens", []):
+        token_id = added.get("id")
+        if added.get("special") and isinstance(token_id, int):
+            result.add(token_id)
+    return result
 
 
 def load_merges(path: Path) -> list[tuple[int, int, int, int]]:
@@ -198,8 +219,8 @@ def load_merges(path: Path) -> list[tuple[int, int, int, int]]:
         if left not in vocab or right not in vocab or combined not in vocab:
             raise ValueError(f"invalid BPE merge {merge!r}")
         ids = (vocab[left], vocab[right], vocab[combined], rank)
-        if any(value > 0xFFFF for value in ids):
-            raise ValueError(".litemodel v1 supports at most 65536 tokens/merges")
+        if any(value < 0 or value > 0xFFFFFFFF for value in ids):
+            raise ValueError(".litemodel tokenizer IDs must fit in 32 bits")
         result.append(ids)
     return result
 
@@ -211,11 +232,22 @@ def _special_id(config: dict, name: str, fallback: int) -> int:
     return fallback if value is None else int(value)
 
 
+def _configured_special_ids(config: dict) -> set[int]:
+    result = set()
+    for name in ("bos_token_id", "eos_token_id", "pad_token_id", "unk_token_id"):
+        value = config.get(name)
+        if isinstance(value, list):
+            result.update(int(item) for item in value if item is not None)
+        elif value is not None:
+            result.add(int(value))
+    return result
+
+
 def write_litemodel(*, model: Path, tokenizer: Path, config: dict, output: Path,
                     bits: int, architecture: int, flags: int,
                     architecture_data: bytes, plan: list[tuple]):
-    if bits not in (2, 4, 8, 16, 32):
-        raise ValueError("bits must be 2, 4, 8, 16, or 32")
+    if bits not in SUPPORTED_BITS:
+        raise ValueError("bits must be Q1-Q8, FP16, or FP32")
     sf = SafeTensorFile(model)
     output.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(prefix=output.name + ".", dir=output.parent)
@@ -240,14 +272,16 @@ def write_litemodel(*, model: Path, tokenizer: Path, config: dict, output: Path,
             eos = _special_id(config, "eos_token_id", 2)
             pad = _special_id(config, "pad_token_id", 0)
             unk = _special_id(config, "unk_token_id", 3)
-            special = {bos, eos, pad, unk}
+            special = _configured_special_ids(config)
             tokens = load_token_bytes(tokenizer, int(config["vocab_size"]), special)
+            special_tokens = load_special_token_ids(tokenizer, special)
             token_index_offset = out.tell()
             token_offset = 0
-            for token in tokens:
+            for token_id, token in enumerate(tokens):
                 if len(token) > 0xFFFF:
                     raise ValueError("token is too large")
-                out.write(TOKEN.pack(token_offset, len(token), 0))
+                token_flags = TOKEN_SPECIAL if token_id in special_tokens else 0
+                out.write(TOKEN.pack(token_offset, len(token), token_flags))
                 token_offset += len(token)
             token_data_offset = out.tell()
             for token in tokens:

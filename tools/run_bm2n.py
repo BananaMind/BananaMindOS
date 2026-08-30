@@ -84,16 +84,26 @@ class BM2NRunner:
         packed = records[:, 4:]
         if bits == 8:
             quantized = packed[:, :cols].view(np.int8)
-        elif bits == 4:
-            quantized = np.empty((rows, cols), dtype=np.int8)
-            quantized[:, 0::2] = packed & 15
-            odd = quantized[:, 1::2]
-            odd[:] = (packed >> 4)[:, : odd.shape[1]]
-            quantized[quantized >= 8] -= 16
         else:
             quantized = np.empty((rows, cols), dtype=np.int8)
-            for shift in range(4):
-                quantized[:, shift::4] = ((packed >> (shift * 2)) & 3)[:, : quantized[:, shift::4].shape[1]] - 1
+            mask = (1 << bits) - 1
+            for column in range(cols):
+                bit_position = column * bits
+                byte = bit_position >> 3
+                shift = bit_position & 7
+                codes = packed[:, byte].astype(np.uint16) >> shift
+                if shift + bits > 8:
+                    codes |= packed[:, byte + 1].astype(np.uint16) << (8 - shift)
+                codes &= mask
+                if bits == 1:
+                    quantized[:, column] = np.where(codes, 1, -1)
+                elif bits == 2:
+                    quantized[:, column] = codes.astype(np.int16) - 1
+                else:
+                    sign = 1 << (bits - 1)
+                    signed = codes.astype(np.int16)
+                    signed[codes & sign != 0] -= 1 << bits
+                    quantized[:, column] = signed
         matrix = quantized.astype(np.float32) * scales[:, None]
         return matrix, offset + rows * stride
 

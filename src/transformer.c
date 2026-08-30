@@ -203,7 +203,7 @@ static void apply_refresh(struct lm_runtime *runtime, uint32_t layer_index,
         runtime->x[index] += refresh->alpha[0] * runtime->normalized[index];
 }
 
-uint16_t lm_transformer_forward(struct lm_runtime *runtime, uint16_t token,
+uint32_t lm_transformer_forward(struct lm_runtime *runtime, uint32_t token,
                                 uint32_t position) {
     const struct litemodel_header *header = runtime->header;
     if (position >= runtime->context_capacity || token >= header->vocab_size) return 0;
@@ -289,9 +289,9 @@ uint16_t lm_transformer_forward(struct lm_runtime *runtime, uint16_t token,
     }
     lm_rms_norm(runtime, runtime->normalized, runtime->x, runtime->final_norm, hidden);
     lm_matvec(&runtime->embedding, runtime->normalized, runtime->logits);
-    uint16_t best = 0;
+    uint32_t best = 0;
     for (uint32_t index = 1; index < header->vocab_size; ++index)
-        if (runtime->logits[index] > runtime->logits[best]) best = (uint16_t)index;
+        if (runtime->logits[index] > runtime->logits[best]) best = index;
     return best;
 }
 
